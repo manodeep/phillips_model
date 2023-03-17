@@ -1,26 +1,3 @@
-module nr
-   public :: ludcmp, lubksb, tridag
-   interface
-      subroutine ludcmp(a,n,np,indx,d)
-         integer, intent(in) :: n, np
-         real, intent(inout), dimension(np,np) :: a
-         integer, intent(out), dimension(n) :: indx
-         real, intent(out) :: d
-      end subroutine ludcmp
-      subroutine lubksb(a,n,np,indx,b)
-         integer, intent(in) :: n, np
-         real, intent(in), dimension(np,np) :: a
-         integer, intent(in), dimension(n) :: indx
-         real, intent(inout), dimension(n) :: b
-      end subroutine lubksb
-      subroutine tridag(a,b,c,r,u,n)
-         integer, intent(in) :: n
-         real, intent(in),  dimension(n) :: a, b, c, r
-         real, intent(out), dimension(n) :: u
-      end subroutine tridag
-   end interface
-end module nr
-
 module constants
    implicit none
    ! Note that i runs 1..nx, j runs 0..ny
@@ -47,7 +24,6 @@ module constants
    logical, public, save :: diag_flag = .false.
    real, parameter, public  :: accel = 1.0
 end module constants
- 
 
 module work
   implicit none
@@ -101,63 +77,55 @@ contains
 
    subroutine calc_zonstream(v1z, v3z, s1z, s3z)
 !     Solve for the zonal mean streamfunction
+      use lapack95
       use constants
-      use nr
       real, intent(in),  dimension(0:) :: v1z, v3z
       real, intent(out), dimension(0:) :: s1z, s3z
       integer, parameter :: nz = 2*ny - 3  ! Number of zonal means to solve for
-      real, dimension(nz) :: bmat, junk
+      real, dimension(nz) :: bmat
       real, dimension(nz,nz) :: amat
       integer :: j
 !     For LU solver
-      real :: d
-      integer, dimension(nz) :: indx
+      integer, dimension(nz) :: ipiv
+      logical, save :: first = .true.
 
-      amat = 0.0
-      ! j = 1, level 1
-      amat(1,1) = -epsq - gamma
-      amat(1,2) = epsq
-      ! j = J-1, level 1
-      amat(ny-1,ny-2) = epsq
-      amat(ny-1,ny-1) = -epsq - gamma
-      amat(ny-1,nz) = gamma
-      ! j = 2, level 3
-      amat(ny,2) = gamma
-      amat(ny,ny) = -2.0*epsq - gamma
-      amat(ny,ny+1) = epsq
-      ! j = J-1, level 3
-      amat(nz,ny-1) = gamma
-      amat(nz,nz-1) = epsq
-      amat(nz,nz) = -epsq - gamma
+      if (first) then
 
-      !  Level 1
-      do j=2,ny-2
-         amat(j,j-1) = epsq
-         amat(j,j) = -2.0*epsq - gamma
-         amat(j,j+1) = epsq
-         amat(j,ny-2+j) = gamma
-      end do
-      !  Level 3
-      do j=ny+1,nz-1
-         amat(j,j+2-ny) = gamma
-         amat(j,j-1) = epsq
-         amat(j,j) = -2.0*epsq - gamma
-         amat(j,j+1) = epsq
-      end do
+         amat = 0.0
+         ! j = 1, level 1
+         amat(1,1) = -epsq - gamma
+         amat(1,2) = epsq
+         ! j = J-1, level 1
+         amat(ny-1,ny-2) = epsq
+         amat(ny-1,ny-1) = -epsq - gamma
+         amat(ny-1,nz) = gamma
+         ! j = 2, level 3
+         amat(ny,2) = gamma
+         amat(ny,ny) = -2.0*epsq - gamma
+         amat(ny,ny+1) = epsq
+         ! j = J-1, level 3
+         amat(nz,ny-1) = gamma
+         amat(nz,nz-1) = epsq
+         amat(nz,nz) = -epsq - gamma
 
-!!$      print*, "AMAT"
-!!$      do j=1,nz
-!!$         write(*,"(7f6.2)") amat(j,:)
-!!$      end do
-!!$
-!!$      do j=1,ny-1
-!!$         junk(j) = s1z(j)
-!!$      end do
-!!$      do j=2,ny-1
-!!$         junk(ny-2+j) = s3z(j)
-!!$      end do
-!!$
-!!$      junk = matmul(amat,junk)
+         !  Level 1
+         do j=2,ny-2
+            amat(j,j-1) = epsq
+            amat(j,j) = -2.0*epsq - gamma
+            amat(j,j+1) = epsq
+            amat(j,ny-2+j) = gamma
+         end do
+         !  Level 3
+         do j=ny+1,nz-1
+            amat(j,j+2-ny) = gamma
+            amat(j,j-1) = epsq
+            amat(j,j) = -2.0*epsq - gamma
+            amat(j,j+1) = epsq
+         end do
+         call getrf(amat, ipiv)
+
+         first = .false.
+      end if
 
       do j=1,ny-1
          bmat(j) = v1z(j)
@@ -167,8 +135,7 @@ contains
       end do
 
       ! Solve AX=B
-      call ludcmp(amat,nz,nz,indx,d)
-      call lubksb(amat,nz,nz,indx,bmat)
+      call getrs(amat, ipiv, bmat)
 
 !!$      do j=1,nz
 !!$         write(unit=4,fmt="(i3,2e15.7)") j, bmat(j), junk(j)
@@ -186,7 +153,8 @@ contains
 !     Apply the BC
       s1z(0) = s1z(1)
       s1z(ny) = s1z(ny-1)
-      s3z(0) = 0.0
+!     Note the extra restriction on s3(1) which is not solved for.
+      s3z(0:1) = 0.0
       s3z(ny) = s3z(ny-1)
 
    end subroutine calc_zonstream
@@ -231,7 +199,7 @@ contains
                        v1(i,j) + gamma*s3(i,j) ) -      &
                        ( 2.0 + 2.0*epsq + gamma )*s1(i,j)
                   resid = accel*resid / ( 2.0 + 2.0*epsq + gamma )
-                  change = change + resid**2 
+                  change = change + resid**2
                   maxdiff = max ( maxdiff, abs(resid) )
                   s1(i,j) = s1(i,j) + resid
 
@@ -247,7 +215,7 @@ contains
             end do
          end do
 !            print*, "ITER1", iter, sqrt(change), maxdiff
-         ! maxdiff is now only on a single level so halve the convergence 
+         ! maxdiff is now only on a single level so halve the convergence
          ! criterion/
          if ( maxdiff < 0.5*3.75e4 ) then
             ! print*, "ITER1", iter, sqrt(change), maxdiff
@@ -372,12 +340,12 @@ contains
    subroutine calc_zvor(x1z, x3z, dt, v1z, v3z)
 !     Solve for the zonal mean vorticity
       use constants
-      use nr
+      use lapack95
       real, intent(in),  dimension(0:) :: x1z, x3z
       real, intent(in) :: dt
       real, intent(out), dimension(0:) :: v1z, v3z
       integer, parameter :: nz = ny-1  ! Number of zonal means to solve for
-      real, dimension(nz) :: amat, bmat, cmat, rmat, umat
+      real, dimension(nz) :: amat, bmat, cmat, rmat
       integer :: j
       real :: alpha
 
@@ -398,9 +366,9 @@ contains
 
       rmat = -x1z(1:nz)
 
-      call tridag(amat,bmat,cmat,rmat,umat,nz)
+      call gtsv(amat(2:), bmat, cmat(:nz-1), rmat)
 
-      v1z(1:nz) = umat
+      v1z(1:nz) = rmat
       v1z(0) = v1z(1)
       v1z(ny) = v1z(ny-1)
 
@@ -419,14 +387,14 @@ contains
 
       rmat = -x3z(1:nz)
 
-      call tridag(amat,bmat,cmat,rmat,umat,nz)
+      call gtsv(amat(2:), bmat, cmat(:nz-1), rmat)
 
-      v3z(1:nz) = umat
+      v3z(1:nz) = rmat
       v3z(0) = v3z(1)
       v3z(ny) = v3z(ny-1)
 
    end subroutine calc_zvor
-   
+
    subroutine diag(day, zonal, s1, s3)
       use constants
       real, intent(in) :: day
@@ -450,7 +418,7 @@ contains
 
          ! Zonal KE, scaled such that a wind of 1 m/s everywhere gives 10
          zke = 10.0*sum(u1z*u1z + u3z*u3z)/(2*ny)
-         ! write(unit=*,fmt="(a,f5.1,4f15.7)") "TZ ", day, maxval(t2z), maxval(u1z), maxval(u3z), zke
+         write(unit=*,fmt="(a,f5.1,4f15.7)") "TZ ", day, maxval(t2z), maxval(u1z), maxval(u3z), zke
       else
          write(unit=3,fmt="(f8.3,2e15.7)") day, s1(1,8), s3(1,8)
          u1t = - ( s1(:,1:ny) - s1(:,0:ny-1) ) / dy
@@ -493,7 +461,7 @@ contains
          write(unit=1) v1t(:,1:ny), (/ (0.0,jj=1,nx) /)
          write(unit=1) v3t(:,1:ny), (/ (0.0,jj=1,nx) /)
          close(unit=1)
-         ! write(unit=*,fmt="(a,f5.1,6f15.7)") "KE ", day, maxval(t2), maxval(u1t), maxval(u3), zke, eke, tke
+         write(unit=*,fmt="(a,f5.1,6f15.7)") "KE ", day, maxval(t2), maxval(u1t), maxval(u3), zke, eke, tke
       end if
 
 !!$      if ( istep == 130 ) then
@@ -537,13 +505,13 @@ contains
    end subroutine diagvv
 
 end module work
- 
+
 program phillips
 
 !  Implementation of Phillips' model.
 !  The time integration is carried forward using the vorticity in a three
-!  time level scheme. At each step the streamfunction must be diagnosed from 
-!  this. 
+!  time level scheme. At each step the streamfunction must be diagnosed from
+!  this.
 
 !  The streamfunction is denoted by s and vorticity by v.
 !  Vector wind components are uc and vc.
@@ -566,7 +534,7 @@ program phillips
    real, dimension(nx,0:ny) :: x1t, x3t
    real, dimension(nx,0:ny) :: x1, x3
    real, dimension(0:ny)    :: x1z, x3z
-   
+
    integer :: i, j, im, ip, jm, jp, seed
    real    :: istep, day, swap
    logical :: zonal, addnoise
@@ -597,7 +565,7 @@ program phillips
    addnoise = .false.
 
    ! Time loop
-   do 
+   do
 
       if ( day < day1 ) then
          zonal = .true. ! 130 day spin up using a one day time step
@@ -607,11 +575,11 @@ program phillips
          dt = dt2
          diag_flag = .false.
          if ( .not. addnoise ) then
-            call rluxgo(3,seed,0,0)
-            call ranlux(rarray,nx*(ny-1))
-            rand = reshape(rarray, (/ nx, ny-1 /) )
-!            call random_seed()
-!            call random_number(rand)
+            ! call rluxgo(3,seed,0,0)
+            ! call ranlux(rarray,nx*(ny-1))
+            ! rand = reshape(rarray, (/ nx, ny-1 /) )
+            call random_seed()
+            call random_number(rand)
             ! Remove the zonal mean
             do j=1,ny-1
                rand(:,j) = rand(:,j) - sum(rand(:,j))/nx
@@ -629,7 +597,7 @@ program phillips
             v3tm = v3t - (v3t-v3tm)*dt2/dt1
             diag_flag = .true.
          end if
-         
+
       end if
 
       call split(v1t,v1z,v1)
@@ -654,7 +622,7 @@ program phillips
          call diag(day, zonal, s1t, s3t)
          if (.not. zonal ) then
             ! print*, 'Enter to continue'
-            read(*,*) 
+            ! read(*,*)
          end if
      end if
 !      call diagvv(s1t, s3t, s1tm, s3tm, dt)
