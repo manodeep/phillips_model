@@ -108,6 +108,16 @@ class Model:
 
     first_step = True # For solver initialisation
 
+    # All initialised to zero, so model is at rest
+    v =  Var() #  ! Vorticity
+    vm = Var() #  ! Vorticity at tau - 1 values
+    s  = Var() #  ! Streamfunction
+    # Temporaries used in timestepping
+    x = Var()
+
+    time = 0
+    day = 0
+
     def calcvor(self, s, v):
         # This repeats same code for each level. Should the level be another dimension?
         for j in range(1,Grid.ny):
@@ -515,15 +525,11 @@ class Model:
 
     def spinup(self):
 
-        # All initialised to zero, so model is at rest
-        v =  Var() #  ! Vorticity
-        vm = Var() #  ! Vorticity at tau - 1 values
-        s  = Var() #  ! Streamfunction
-        # Temporaries used in timestepping
-        x = Var()
+        v = self.v
+        vm = self.vm
+        s = self.s
+        x = self.x
 
-        time = 0
-        day = 0.0
         dt = self.dt1
 
         # Time loop
@@ -538,8 +544,8 @@ class Model:
             for j in range(Grid.ny+1):
                 s.l1t[:,j] = s.l1[:,j] + s.l1z[j]
                 s.l3t[:,j] = s.l3[:,j] + s.l3z[j]
-            if time % self.diag_freq == 0:
-                self.zonal_diag(day, s)
+            if self.time % self.diag_freq == 0:
+                self.zonal_diag(self.day, s)
 
             # Time stepping
             self.xcalc(v, vm, s, dt, x)
@@ -548,7 +554,7 @@ class Model:
             # Solve for new zonal mean vorticity from x
             self.calc_zvor(x,dt,v)
 
-            if time == 0.0:
+            if self.time == 0.0:
                 # Forward step from rest. This simple form for the forward step
                 # assumes that it's starting from rest.
                 v.l1z = 0.5*x.l1z
@@ -562,15 +568,17 @@ class Model:
                 v.l1t[:,j] = v.l1z[j]
                 v.l3t[:,j] = v.l3z[j]
 
-            time += dt
-            day = time/86400.0
-            if day >= self.day1:
+            self.time += dt
+            self.day = self.time/86400.0
+            if self.day >= self.day1:
                 break
 
         return vm, v
 
-    def perturb(self, vm, v):
+    def perturb(self):
 
+        vm = self.vm
+        v = self.v
         stmp = Var() # For random initialisation
         vtmp = Var() # For random initialisation
 
@@ -596,68 +604,60 @@ class Model:
         vm.l1t[:] += vtmp.l1t
         vm.l3t[:] += vtmp.l3t
 
-        return vm, v
+    def step(self):
 
-    def run(self, vm, v):
-
-        # All initialised to zero, so model is at rest
-        s  = Var() #  ! Streamfunction
-        # Temporaries used in timestepping
-        x = Var()
-
-        day = self.day1
-        time = day * 86400
+        v = self.v
+        vm = self.vm
+        s = self.s
+        x = self.x
         dt = self.dt2
-        # Time loop
-        while True:
 
-            v.split()
-            self.calc_zonstream(v, s)
+        v.split()
+        self.calc_zonstream(v, s)
 
-            #  Use relaxation to solve for the anomaly streamfunction
-            self.relax1(v, s)
+        #  Use relaxation to solve for the anomaly streamfunction
+        self.relax1(v, s)
 
-            # Should be a function
-            for j in range(Grid.ny+1):
-                s.l1t[:,j] = s.l1[:,j] + s.l1z[j]
-                s.l3t[:,j] = s.l3[:,j] + s.l3z[j]
-            if time % self.diag_freq == 0:
-                self.diag(day, s)
-                if self.save_netcdf:
-                    self.nc_output(day, v, s)
+        # Should be a function
+        for j in range(Grid.ny+1):
+            s.l1t[:,j] = s.l1[:,j] + s.l1z[j]
+            s.l3t[:,j] = s.l3[:,j] + s.l3z[j]
+        if self.time % self.diag_freq == 0:
+            self.diag(self.day, s)
+            if self.save_netcdf:
+                self.nc_output(self.day, v, s)
 
-            # Time stepping
-            self.xcalc(v, vm, s, dt, x)
-            x.split()
+        # Time stepping
+        self.xcalc(v, vm, s, dt, x)
+        x.split()
 
-            # Solve for new zonal mean vorticity from x
-            self.calc_zvor(x,dt,v)
+        # Solve for new zonal mean vorticity from x
+        self.calc_zvor(x,dt,v)
 
-            if time == 0.0:
-                # Forward step from rest. This simple form for the forward step
-                # assumes that it's starting from rest.
-                v.l1z = 0.5*x.l1z
-                v.l3z = 0.5*x.l3z
-            else:
-                # Update previous value of vorticity
-                vm.settot(v)
+        if self.time == 0.0:
+            # Forward step from rest. This simple form for the forward step
+            # assumes that it's starting from rest.
+            v.l1z = 0.5*x.l1z
+            v.l3z = 0.5*x.l3z
+        else:
+            # Update previous value of vorticity
+            vm.settot(v)
 
-            # Relaxation solver for non-zonal terms
-            self.relax2(x, dt, v)
+        # Relaxation solver for non-zonal terms
+        self.relax2(x, dt, v)
 
-            for j in range(Grid.ny+1):
-                v.l1t[:,j] = v.l1[:,j] + v.l1z[j]
-                v.l3t[:,j] = v.l3[:,j] + v.l3z[j]
+        for j in range(Grid.ny+1):
+            v.l1t[:,j] = v.l1[:,j] + v.l1z[j]
+            v.l3t[:,j] = v.l3[:,j] + v.l3z[j]
 
-            time += dt
-            day = time/86400.0
-            if day > self.day2:
-                break
+        self.time += dt
+        self.day = self.time/86400.0
 
 if __name__ == '__main__':
     m = Model()
     if m.save_netcdf:
         m.create_nc_output()
-    vm, v = m.spinup()
-    vm, v = m.perturb(vm, v)
-    m.run(vm, v)
+    m.spinup()
+    m.perturb()
+    while m.day < m.day2:
+        m.step()
