@@ -340,7 +340,6 @@ contains
       integer :: j
       real :: alpha
 
-
       alpha = a*dt/dx**2
       ! Level 1
       amat(1) = 0.0
@@ -856,11 +855,7 @@ program phillips
 !      call diagvv(s1t, s3t, s1tm, s3tm, dt)
 
       ! Time stepping
-      if ( zonal ) then
-         call xcalc(v1t, v3t, v1tm, v3tm, s1t, s3t, s1tm, s3tm, dt, x1t, x3t)
-      else
-         call xcalc(v1t, v3t, v1tm, v3tm, s1t, s3t, s1tm, s3tm, dt, x1t, x3t)
-      end if
+      call xcalc(v1t, v3t, v1tm, v3tm, s1t, s3t, s1tm, s3tm, dt, x1t, x3t)
       call split(x1t,x1z,x1)
       call split(x3t,x3z,x3)
 
