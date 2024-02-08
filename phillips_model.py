@@ -10,8 +10,7 @@
 # Total fields are denoted with suffix t and zonal means with suffix z
 
 import numpy as np
-from numpy import linalg
-from scipy.linalg.lapack import dgtsv
+from scipy.linalg.lapack import dgtsv, dgetrf, dgetrs
 
 import netCDF4
 
@@ -107,6 +106,8 @@ class Model:
     dt2 = 3600.   # Time step in regular run
     diag_freq = 3600
 
+    first_step = True # For solver initialisation
+
     def calcvor(self, s, v):
         # This repeats same code for each level. Should the level be another dimension?
         for j in range(1,Grid.ny):
@@ -140,46 +141,50 @@ class Model:
         epsq = self.epsq
         gamma = self.gamma
 
-	# Start these arrays from 1 again
-        amat = np.zeros((nz+1,nz+1))
-        bmat = np.zeros(nz+1)
+        if self.first_step:
+            self.first_step = False
+            # Start these arrays from 1 again
+            amat = np.zeros((nz+1,nz+1))
 
-        # j = 1, level 1
-        amat[1,1] = -epsq - gamma
-        amat[1,2] = epsq
-        # j = J-1, level 1
-        amat[ny-1,ny-2] = epsq
-        amat[ny-1,ny-1] = -epsq - gamma
-        amat[ny-1,nz] = gamma
-        # j = 2, level 3
-        amat[ny,2] = gamma
-        amat[ny,ny] = -2.0*epsq - gamma
-        amat[ny,ny+1] = epsq
-        # j = J-1, level 3
-        amat[nz,ny-1] = gamma
-        amat[nz,nz-1] = epsq
-        amat[nz,nz] = -epsq - gamma
+            # j = 1, level 1
+            amat[1,1] = -epsq - gamma
+            amat[1,2] = epsq
+            # j = J-1, level 1
+            amat[ny-1,ny-2] = epsq
+            amat[ny-1,ny-1] = -epsq - gamma
+            amat[ny-1,nz] = gamma
+            # j = 2, level 3
+            amat[ny,2] = gamma
+            amat[ny,ny] = -2.0*epsq - gamma
+            amat[ny,ny+1] = epsq
+            # j = J-1, level 3
+            amat[nz,ny-1] = gamma
+            amat[nz,nz-1] = epsq
+            amat[nz,nz] = -epsq - gamma
 
-        #  Level 1
-        for j in range(2,ny-1):
-            amat[j,j-1] = epsq
-            amat[j,j] = -2.0*epsq - gamma
-            amat[j,j+1] = epsq
-            amat[j,ny-2+j] = gamma
+            #  Level 1
+            for j in range(2,ny-1):
+                amat[j,j-1] = epsq
+                amat[j,j] = -2.0*epsq - gamma
+                amat[j,j+1] = epsq
+                amat[j,ny-2+j] = gamma
 
-        #  Level 3
+            #  Level 3
             for j in range(ny+1, nz):
                 amat[j,j+2-ny] = gamma
                 amat[j,j-1] = epsq
                 amat[j,j] = -2.0*epsq - gamma
                 amat[j,j+1] = epsq
 
+            self.lu, self.piv, info = dgetrf(amat[1:,1:])
+
+        bmat = np.zeros(nz+1)
         bmat[1:ny] = v.l1z[1:ny]
         for j in range(2,ny):
             bmat[ny-2+j] = v.l3z[j]
 
         # Solve AX=B
-        bmat[1:] = linalg.solve(amat[1:,1:],bmat[1:])
+        bmat[1:], info = dgetrs(self.lu, self.piv, bmat[1:])
 
         for j in range(1,ny):
             s.l1z[j] = bmat[j]
@@ -190,6 +195,8 @@ class Model:
         s.l1z[0] = s.l1z[1]
         s.l1z[ny] = s.l1z[ny-1]
         s.l3z[0] = 0.0
+        # Note the extra restriction on s3(1) which is not solved for.
+        s.l3z[1] = 0.0
         s.l3z[ny] = s.l3z[ny-1]
 
     def relax1(self, v, s):
