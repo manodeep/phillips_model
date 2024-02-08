@@ -3,7 +3,11 @@
 
 import numpy as np
 from numpy import linalg
-import ranlux
+import netCDF4
+
+def msq_rand(x):
+    # Middle 10 digits following Hammer
+    return ((x*x) // 10**5) % 10**10
 
 class Grid:
     nx = 16
@@ -27,14 +31,14 @@ class Var():
     def dump(self):
         for j in range(0,Grid.ny+1):
             for i in range(1,Grid.nx+1):
-		print "%12.4f " % self.l1t[i,j],
-            print
+                print(f"{self.l1t[i,j]:12.4f}", end="")
+            print()
 
     def adump(self):
         for j in range(0,Grid.ny+1):
             for i in range(1,Grid.nx+1):
-		print "%12.4f " % self.l1[i,j],
-            print
+                print(f"{self.l1[i,j]:12.4f}", end="")
+            print()
 
     def settot(self,val):
         if isinstance(val,Var):
@@ -82,28 +86,37 @@ class Model:
     diag_flag = False
     accel = 1.0
 
+    noisescale = 1.237e7
+
+    # For netcdf output
+    irec = -1
 
     def calcvor(self, s, v):
         # This repeats same code for each level. Should the level be another dimension?
         for j in range(1,Grid.ny):
- 	    jm = j-1
- 	    jp = j+1
+            jm = j-1
+            jp = j+1
             for i in range(1,Grid.nx+1):
                 im = i-1
                 if im == 0:
                     im = Grid.nx
-                ip = i+1;
+                ip = i+1
                 if ip == Grid.nx+1:
- 		    ip = 1
- 		v.l1t[i,j] = ( s.l1t[ip,j]  + s.l1t[im,j] - 2*s.l1t[i,j] ) + \
+                    ip = 1
+                v.l1t[i,j] = ( s.l1t[ip,j]  + s.l1t[im,j] - 2*s.l1t[i,j] ) + \
                     self.epsq * ( s.l1t[i,jp] + s.l1t[i,jm] - 2*s.l1t[i,j] ) - \
                     self.gamma * ( s.l1t[i,j] - s.l3t[i,j] )
- 		v.l3t[i,j] = ( s.l3t[ip,j] + s.l3t[im,j] - 2*s.l3t[i,j] ) + \
+                v.l3t[i,j] = ( s.l3t[ip,j] + s.l3t[im,j] - 2*s.l3t[i,j] ) + \
                     self.epsq * ( s.l3t[i,jp] + s.l3t[i,jm] - 2*s.l3t[i,j] ) + \
                     self.gamma * ( s.l1t[i,j] - s.l3t[i,j] )
+        # Follow A17 and set end rows to zonal mean of neighbours
+        v.l1t[:,0] = v.l1t[:,1].mean()
+        v.l1t[:,Grid.ny] = v.l1t[:,Grid.ny-1].mean()
+        v.l3t[:,0] = v.l3t[:,1].mean()
+        v.l3t[:,Grid.ny] = v.l3t[:,Grid.ny-1].mean()
 
     def calc_zonstream(self, v, s):
-        # Given vorticity variable as input, solve for the 
+        # Given vorticity variable as input, solve for the
         # zonal mean streamfunction
 
         ny = Grid.ny
@@ -137,7 +150,7 @@ class Model:
             amat[j,j] = -2.0*epsq - gamma
             amat[j,j+1] = epsq
             amat[j,ny-2+j] = gamma
-            
+
         #  Level 3
             for j in range(ny+1, nz):
                 amat[j,j+2-ny] = gamma
@@ -145,30 +158,11 @@ class Model:
                 amat[j,j] = -2.0*epsq - gamma
                 amat[j,j+1] = epsq
 
-#       print*, "AMAT"
-#       do j=1,nz
-#          write(*,"(7f6.2)") amat(j,:)
-#       end do
-
-#       do j=1,ny-1
-#          junk(j) = s1z(j)
-#       end do
-#       do j=2,ny-1
-#          junk(ny-2+j) = s3z(j)
-#       end do
-
-#      junk = matmul(amat,junk)
-
         bmat[1:ny] = v.l1z[1:ny]
         for j in range(2,ny):
             bmat[ny-2+j] = v.l3z[j]
 
         # Solve AX=B
-#         print "AMAT"
-#         print amat
-#         print "BMAT"
-#         print bmat
-#        print "B shape", bmat.shape
         bmat[1:] = linalg.solve(amat[1:,1:],bmat[1:])
 
         for j in range(1,ny):
@@ -182,9 +176,10 @@ class Model:
         s.l3z[0] = 0.0
         s.l3z[ny] = s.l3z[ny-1]
 
-    def relax1(self,v, s):
+    def relax1(self, v, s):
         # Solve for anomaly streamfunction
 
+        # print("V1 anom", abs(v.l1).max())
         nx = Grid.nx
         ny = Grid.ny
         # Start from the current value of the anomaly streamfunction
@@ -192,49 +187,47 @@ class Model:
             # Jacobi iteration
             maxdiff = 0.0
             change = 0.0
-            for irb in range(2):
-                for j in range(1,ny):
-                    jm = j-1
-                    jp = j+1
-                    for i in range(1,nx+1):
-                        im = i-1
-                        if im == 0:
-                            im = nx
-                        ip = i+1
-                        if ip == nx+1:
-                            ip = 1
+            # for irb in range(2):
+            for j in range(1,ny):
+                jm = j-1
+                jp = j+1
+                for i in range(1,nx+1):
+                    im = i-1
+                    if im == 0:
+                        im = nx
+                    ip = i+1
+                    if ip == nx+1:
+                        ip = 1
 
-                        resid = ( s.l1[ip,j] + s.l1[im,j] + 
-                                  self.epsq*( s.l1[i,jp] + s.l1[i,jm] ) - 
-                                  v.l1[i,j] + self.gamma*s.l3[i,j] ) -  \
-                                  ( 2.0 + 2.0*self.epsq + self.gamma )*s.l1[i,j]
-                        resid = self.accel*resid / ( 2.0 + 2.0*self.epsq + self.gamma )
-                        change = change + resid**2 
-                        maxdiff = max ( maxdiff, abs(resid) )
-                        s.l1[i,j] = s.l1[i,j] + resid
+                    resid = ( s.l1[ip,j] + s.l1[im,j] +
+                                self.epsq*( s.l1[i,jp] + s.l1[i,jm] ) -
+                                v.l1[i,j] + self.gamma*s.l3[i,j] ) -  \
+                                ( 2.0 + 2.0*self.epsq + self.gamma )*s.l1[i,j]
+                    resid = self.accel*resid / ( 2.0 + 2.0*self.epsq + self.gamma )
+                    change = change + resid**2
+                    maxdiff = max ( maxdiff, abs(resid) )
+                    s.l1[i,j] = s.l1[i,j] + resid
 
-                        resid = ( s.l3[ip,j] + s.l3[im,j] + 
-                                  self.epsq*( s.l3[i,jp] + s.l3[i,jm] ) - 
-                                  v.l3[i,j] + self.gamma*s.l1[i,j] ) -  \
-                                  ( 2.0 + 2.0*self.epsq + self.gamma )*s.l3[i,j]
+                    resid = ( s.l3[ip,j] + s.l3[im,j] +
+                                self.epsq*( s.l3[i,jp] + s.l3[i,jm] ) -
+                                v.l3[i,j] + self.gamma*s.l1[i,j] ) -  \
+                                ( 2.0 + 2.0*self.epsq + self.gamma )*s.l3[i,j]
 
-                        resid = self.accel*resid / ( 2.0 + 2.0*self.epsq + self.gamma )
-                        change = change + resid**2
-                        maxdiff = max ( maxdiff, abs(resid) )
-                        s.l3[i,j] = s.l3[i,j] + resid
-            # print "ITER1", iter, np.sqrt(change), maxdiff
-            # maxdiff is now only on a single level so halve the convergence 
+                    resid = self.accel*resid / ( 2.0 + 2.0*self.epsq + self.gamma )
+                    change = change + resid**2
+                    maxdiff = max ( maxdiff, abs(resid) )
+                    s.l3[i,j] = s.l3[i,j] + resid
+            # print("ITER1", iter, np.sqrt(change), maxdiff)
+            # maxdiff is now only on a single level so halve the convergence
             # criterion
             if maxdiff < 0.5*3.75e4:
                 # print "ITER1 done", iter, np.sqrt(change), maxdiff
                 break
-        
         if iter >= 100:
-            print "RELAX1 failed", iter, np.sqrt(change), maxdiff
+            raise Exception(f"RELAX1 failed {iter} {np.sqrt(change)} {maxdiff}")
 
     def relax2(self, x, dt, v):
         # Solve for anomaly vorticity
-        # real, dimension(nx,0:ny) :: temp1, temp3
 
         temp = Var()
         nx = Grid.nx
@@ -255,24 +248,25 @@ class Model:
                     ip = i+1
                     if ip == nx+1:
                         ip = 1
-                    temp.l1[i,j] = ( alpha*( v.l1[ip,j] + v.l1[im,j] + 
-                                             self.epsq * ( v.l1[i,jp] + v.l1[i,jm] ) ) + 
+                    temp.l1[i,j] = ( alpha*( v.l1[ip,j] + v.l1[im,j] +
+                                             self.epsq * ( v.l1[i,jp] + v.l1[i,jm] ) ) +
                                      x.l1[i,j]  ) /    \
                                      ( 2*alpha*(1.0 + self.epsq)  + 1.0 )
-                    temp.l3[i,j] = ( alpha*( v.l3[ip,j] + v.l3[im,j] + 
-                                             self.epsq * ( v.l3[i,jp] + v.l3[i,jm] ) ) + 
+                    temp.l3[i,j] = ( alpha*( v.l3[ip,j] + v.l3[im,j] +
+                                             self.epsq * ( v.l3[i,jp] + v.l3[i,jm] ) ) +
                                      x.l3[i,j]  ) /    \
                                      ( 2*alpha*(1.0 + self.epsq)  + 1.0 +1.5*self.k*dt )
                 change1 = np.sum ( ( v.l1[1:,1:] - temp.l1[1:,1:] ) **2 )
                 v.l1[:,1:ny] = temp.l1[:,1:ny]
-                v.l1[:,0] = v.l1[:,1]
-                v.l1[:,ny] = v.l1[:,ny-1]
+                # Boundary condition A17
+                v.l1[:,0] = v.l1[:,1].mean()
+                v.l1[:,ny] = v.l1[:,ny-1].mean()
                 change3 = np.sum ( ( v.l3[1:,1:] - temp.l3[1:,1:] ) **2 )
                 v.l3[:,1:ny] = temp.l3[:,1:ny]
-                v.l3[:,0] = v.l3[:,1]
-                v.l3[:,ny] = v.l3[:,ny-1]
+                v.l3[:,0] = v.l3[:,1].mean()
+                v.l3[:,ny] = v.l3[:,ny-1].mean()
                 if max(change1, change3) < 1.0:
-                    print "ITER2", iter, np.sqrt(change1), np.sqrt(change3)
+                    # print("ITER2", iter, np.sqrt(change1), np.sqrt(change3))
                     break
 
     def xcalc(self, v, vm, s, sm, dt, x):
@@ -282,7 +276,7 @@ class Model:
         alpha = self.a*dt/self.dx**2
         if not self.imp:
             alpha = 2.0 * alpha
-            
+
         b = self.beta*self.dx**2*self.dy
         c = dt/(2.0*self.dx*self.dy)
         h = 4*self.rgas*self.heat*self.gamma*dt/(self.f0*self.cp)
@@ -303,20 +297,20 @@ class Model:
                     c * ( (v.l1t[ip,j]-v.l1t[im,j])*(s.l1t[i,jp]-s.l1t[i,jm]) -             \
                           (2*b+v.l1t[i,jp]-v.l1t[i,jm])*(s.l1t[ip,j]-s.l1t[im,j]) ) +      \
                           alpha * ( vm.l1t[ip,j]+vm.l1t[im,j]-2*vm.l1t[i,j] +           \
-                                        self.epsq*(vm.l1t[i,jp]+vm.l1t[i,jm]-2*vm.l1t[i,j]) ) +        \
-                                        h*(2*j-ny)/ny
+                                    self.epsq*(vm.l1t[i,jp]+vm.l1t[i,jm]-2*vm.l1t[i,j]) ) +        \
+                        h*(2*j-ny)/ny
 
                 x.l3t[i,j] = vm.l3t[i,j] +                                             \
                     c * ( (v.l3t[ip,j]-v.l3t[im,j])*(s.l3t[i,jp]-s.l3t[i,jm]) -              \
                            (2*b+v.l3t[i,jp]-v.l3t[i,jm])*(s.l3t[ip,j]-s.l3t[im,j]) ) +       \
                            alpha * ( vm.l3t[ip,j]+vm.l3t[im,j]-2*vm.l3t[i,j] +            \
-                                         self.epsq*(vm.l3t[i,jp]+vm.l3t[i,jm]-2*vm.l3t[i,j]) ) -  \
-                                         h*(2*j-ny)/ny
+                                    self.epsq*(vm.l3t[i,jp]+vm.l3t[i,jm]-2*vm.l3t[i,j]) ) -  \
+                        h*(2*j-ny)/ny
                 if self.imp:
-                    x.l3t[i,j] = x.l3t[i,j] -  self.k*dt*(1.5*vm.l3t[i,j] - v.l1t[i,j] - 
+                    x.l3t[i,j] = x.l3t[i,j] -  self.k*dt*(1.5*vm.l3t[i,j] - v.l1t[i,j] -
                                                4*self.gamma*(s.l1t[i,j]-s.l3t[i,j]) )
                 else:
-                    x.l3t[i,j] = x.l3t[i,j] -  self.k*dt*(3.0*vm.l3t[i,j] - vm.l1t[i,j] - 
+                    x.l3t[i,j] = x.l3t[i,j] -  self.k*dt*(3.0*vm.l3t[i,j] - vm.l1t[i,j] -
                                                4*self.gamma*(sm.l1t[i,j]-sm.l3t[i,j]) )
 
     def tridag(self,A,B,C,R,U,N):
@@ -360,13 +354,7 @@ class Model:
 
         rmat[1:] = -x.l1z[1:nz+1]
 
-#         print "CALC_ZVOR A", amat
-#         print "CALC_ZVOR B" , bmat
-#         print "CALC_ZVOR C" , cmat
-#         print "CALC_ZVOR R", rmat
-
         self.tridag(amat,bmat,cmat,rmat,umat,nz)
-#        print "CALC_ZVOR U", umat
 
         v.l1z[1:nz+1] = umat[1:nz+1]
         v.l1z[0] = v.l1z[1]
@@ -386,136 +374,173 @@ class Model:
         rmat[1:] = -x.l3z[1:nz+1]
 
         self.tridag(amat,bmat,cmat,rmat,umat,nz)
-        
+
         v.l3z[1:nz+1] = umat[1:nz+1]
         v.l3z[0] = v.l3z[1]
         v.l3z[ny] = v.l3z[ny-1]
 
-        # end subroutine calc_zvor
-   
-    def diag(self, day, zonal, s):
-#         real, dimension(0:ny) :: t2z
-#         real, dimension(nx,0:ny) :: t2
-#         real, dimension(1:ny) :: u1z, u3z, v1z, v3z
-#         real, dimension(nx,1:ny) :: u1t, u3t, u1, u3, v1, v3
-#         real, dimension(nx,0:ny) :: v1t, v3t
-#         real :: tke, zke, eke
-#         integer :: j, jj
-        
+    def zonal_diag(self, day, s):
+        u = Var()
+        ny = Grid.ny
+        dy = self.dy
+
+        t2z = self.f0*(s.l1z[:]-s.l3z[:])/self.rgas
+        #  Zonal wind, u = -pd{psi}{y}
+        u.l1z[1:] = - ( s.l1z[1:ny+1] - s.l1z[0:ny] ) / dy
+        u.l3z[1:] = - ( s.l3z[1:ny+1] - s.l3z[0:ny] ) / dy
+
+        # Zonal KE, scaled such that a wind of 1 m/s everywhere gives 10
+        zke = 10.0*np.sum(u.l1z*u.l1z + u.l3z*u.l3z)/(2*ny)
+
+        # Zonal PE  A21
+        # Sum 1:J-1 / J matches definition of Y operator
+        zpe = 5*self.lambdasq*np.sum((s.l1z[1:ny] - s.l3z[1:ny])**2) / ny
+
+        print("TZ %5.1f %15.7f %15.7f %15.7f %15.7f %15.7f" % ( day, t2z.max(), u.l1z.max(), u.l3z.max(), zke, zpe))
+
+    def diag(self, day, s):
+
         u = Var()
         v = Var()
+        vshift = Var()
         nx = Grid.nx; ny = Grid.ny
         dx = self.dx; dy = self.dy
 
-#         print "S1", s.l1t[1,:]
-#         print "S1Z", s.l1z[:]
+        u.l1t[:,1:] = - ( s.l1t[:,1:ny+1] - s.l1t[:,0:ny] ) / dy
+        u.l3t[:,1:] = - ( s.l3t[:,1:ny+1] - s.l3t[:,0:ny] ) / dy
+        for i in range(1,nx+1):
+            im = i-1
+            if im == 0:
+                im = nx
+            v.l1t[i,:] = ( s.l1t[i,:] - s.l1t[im,:] ) / dx
+            v.l3t[i,:] = ( s.l3t[i,:] - s.l3t[im,:] ) / dx
+        #  Average v to get it on the same grid points as u
+        for i in range(1,nx+1):
+            ip = i+1
+            if ip > Grid.nx:
+                ip = 1
+            for j in range(1,ny+1):
+                vshift.l1t[i][j] = 0.25*(v.l1t[i][j] + v.l1t[ip][j] +
+                                    v.l1t[i][j-1] + v.l1t[ip][j-1])
+                vshift.l3t[i][j] = 0.25*(v.l3t[i][j] + v.l3t[ip][j] +
+                                    v.l3t[i][j-1] + v.l3t[ip][j-1])
 
-        if zonal:
-            # Why not use zonal components here?
-            t2z = self.f0*(s.l1t[1,:]-s.l3t[1,:])/self.rgas
-            #  Zonal wind, u = -pd{psi}{y}
-            u.l1z[1:] = - ( s.l1t[1,1:ny+1] - s.l1t[1,0:ny] ) / dy
-            u.l3z[1:] = - ( s.l3t[1,1:ny+1] - s.l3t[1,0:ny] ) / dy
+        # Calculate zonal mean and eddy winds
+        u.split()
+        vshift.split()
 
-            # Zonal KE, scaled such that a wind of 1 m/s everywhere gives 10
-            zke = 10.0*np.sum(u.l1z*u.l1z + u.l3z*u.l3z)/(2*ny)
-            print "TZ %5.1f %15.7f %15.7f %15.7f %15.7f" % ( day, t2z.max(), u.l1z.max(), u.l3z.max(), zke)
-        else:
-            # write(unit=3,fmt="(f8.3,2e15.7)") day, s.l1(1,8), s.l3(1,8)
-            if abs(day - round(day,0)) < 0.01 or self.diag_flag:
-                u.l1t[:,1:] = - ( s.l1t[:,1:ny+1] - s.l1t[:,0:ny] ) / dy
-                u.l3t[:,1:] = - ( s.l3t[:,1:ny+1] - s.l3t[:,0:ny] ) / dy
-                for i in range(1,nx+1):
-                    im = i-1
-                    if im == 0:
-                        ix = nx
-                    v.l1t[i,:] = ( s.l1t[i,:] - s.l1t[im,:] ) / dx
-                    v.l3t[i,:] = ( s.l3t[i,:] - s.l3t[im,:] ) / dx
-                #  Average v to get it on the same grid points as u
-                for i in range(1,nx+1):
-                    ip = i+1
-                    if ip > Grid.nx:
-                        ip = 1
-                        for j in range(Grid.ny, 0, -1):
-                            # Reverse loop so don't clobber unused values
-                            v.l1t[i][j] = 0.25*(v.l1t[i][j] + v.l1t[ip][j] + 
-                                                v.l1t[i][j-1] + v.l1t[ip][j-1])
+        tke = 10.0*np.sum(u.l1t[1:,1:]*u.l1t[1:,1:] + u.l3t[1:,1:]*u.l3t[1:,1:] +
+                            vshift.l1t[1:,1:]*vshift.l1t[1:,1:] + vshift.l3t[1:,1:]*vshift.l3t[1:,1:])/(2*ny*nx)
 
-                # Calculate zonal mean and eddy winds
-                u.split()
-                v.split()
+        zke = 10.0*np.sum(u.l1z*u.l1z + u.l3z*u.l3z)/(2*ny)
+        eke = 10.0*np.sum(u.l1*u.l1 + u.l3*u.l3 + vshift.l1*vshift.l1 + vshift.l3*vshift.l3)/(2*ny*nx)
 
-                tke = 10.0*np.sum(u.l1t[1:,1:]*u.l1t[1:,1:] + u.l3t[1:,1:]*u.l3t[1:,1:] + v.l1t[1:,1:]*v.l1t[1:,1:] + v.l3t[1:,1:]*v.l3t[1:,1:])/(2*ny*nx)
+        t2 = self.f0*(s.l1t-s.l3t)/self.rgas
 
-                zke = 10.0*np.sum(u.l1z*u.l1z + u.l3z*u.l3z)/(2*ny)
-                eke = 10.0*np.sum(u.l1*u.l1 + u.l3*u.l3 + v.l1*v.l1 + v.l3*v.l3)/(2*ny*nx)
+        print("KE %6.2f %14.7f %14.7f %14.7f %14.7f %14.7f %14.7f" %( day, t2.max(), u.l1t.max(), u.l3t.max(), zke, eke, tke))
+        if eke > 1e5:
+            raise Exception("EKE too large")
 
-                t2 = self.f0*(s.l1-s.l3)/self.rgas
-#             write(unit=1) s1
-#             write(unit=1) s3
-#             write(unit=1) t2
-#             write(unit=1) u1t, (/ (0.0,jj=1,nx) /)
-#             write(unit=1) u3t, (/ (0.0,jj=1,nx) /)
-#             write(unit=1) v1t(:,1:ny), (/ (0.0,jj=1,nx) /)
-#             write(unit=1) v3t(:,1:ny), (/ (0.0,jj=1,nx) /)
-                print "KE %5.1f %15.7f %15.7f %15.7f %15.7f %15.7f %15.7f \n" %( day, t2.max(), u.l1t.max(), u.l3t.max(), zke, eke, tke)
-#          end if
-#       end if
-# !!$      if ( istep == 130 ) then
-# !!$         do j=1,ny
-# !!$            write(unit=7,fmt="(i3,2e15.7)") j, u1z(j), u3z(j)
-# !!$         end do
-# !!$      end if
+    def create_nc_output(self):
 
-                # end subroutine diag
+        self.ds = netCDF4.Dataset('phillips_model.nc', 'w')
+        ds = self.ds
+        ds.createDimension('lon', Grid.nx)
+        ds.createDimension('lat', 1+Grid.ny)
+        ds.createDimension('vlon', Grid.nx)
+        ds.createDimension('ulat', Grid.ny)
+        ds.createDimension('lev', 2)
+        ds.createDimension('time', None)
+        v = ds.createVariable('lon', np.float32, ('lon',))
+        v.long_name = 'longitude'
+        v.units = 'degrees_east'
+        v = ds.createVariable('lat', np.float32, ('lat',))
+        v.long_name = 'latitude'
+        v.units = 'degrees_north'
+        v = ds.createVariable('vlon', np.float32, ('vlon',))
+        v.long_name = 'V longitude'
+        v.units = 'degrees_east'
+        v = ds.createVariable('ulat', np.float32, ('ulat',))
+        v.long_name = 'U latitude'
+        v.units = 'degrees_north'
+        v = ds.createVariable('lev', np.float32, ('lev',))
+        v.long_name = 'model level'
+        v = ds.createVariable('time', np.float32, ('time',))
+        v.units = "days since 2000-01-01 00:00"
+        v = ds.createVariable('strm', np.float32, ('time', 'lev', 'lat', 'lon'))
+        v.long_name = 'streamfunction'
+        v.units = 'm2 s-1'
+        v = ds.createVariable('vor', np.float32, ('time', 'lev', 'lat', 'lon'))
+        v.long_name = 'vorticity'
+        v.units = 's-1'
+        v = ds.createVariable('t500', np.float32, ('time', 'lat', 'lon'))
+        v.long_name = 'air temperature at 500 hPa'
+        v.units = 'K'
+        v = ds.createVariable('ps', np.float32, ('time', 'lat', 'lon'))
+        v.long_name = 'surface pressure'
+        v.units = 'hPa'
+        v = ds.createVariable('u', np.float32, ('time', 'lev', 'ulat', 'lon'))
+        v.long_name = 'zonal wind'
+        v.units = 'm s-1'
+        v = ds.createVariable('v', np.float32, ('time', 'lev', 'lat', 'vlon'))
+        v.long_name = 'meridional wind'
+        v.units = 'm s-1'
 
-#    subroutine diagvv(s1t,s3t, s1tm, s3tm, dt)
-#       ! Vertical velocity diagnostic
-#       use constants
-#       real, intent(in),  dimension(:,0:) :: s1t, s3t, s1tm, s3tm
-#       real, intent(in) :: dt
-#       real, dimension(0:ny) :: ds1, ds3, s1, s3, w2, vv
-#       integer :: j
+        ds.variables['lon'][:] = 1 + np.arange(Grid.nx)
+        ds.variables['lat'][:] = np.arange(Grid.ny+1)
+        ds.variables['vlon'][:] = 0.5 + np.arange(Grid.nx)
+        ds.variables['ulat'][:] = 0.5 + np.arange(Grid.ny)
+        ds.variables['lev'][:] = [1., 3.]
 
-#       ! Just work on zonal means
-#       ds1 = 0.0 ! s1t(1,:) - s1tm(1,:)
-#       ds3 = 0.0 !s3t(1,:) - s3tm(1,:)
-#       s1  = 0.5 * ( s1t(1,:) + s1tm(1,:) )
-#       s3  = 0.5 * ( s3t(1,:) + s3tm(1,:) )
+    def nc_output(self, day, v, s):
+        # Python variables are (nx, ny) so need to transpose when writing
+        # to match netCDF dimensions
+        self.irec += 1
+        self.ds.variables['vor'][self.irec,0] = v.l1t[1:].T
+        self.ds.variables['vor'][self.irec,1] = v.l3t[1:].T
+        self.ds.variables['strm'][self.irec,0] = s.l1t[1:].T
+        self.ds.variables['strm'][self.irec,1] = s.l3t[1:].T
 
-#       w2(0) = 0.0
-#       w2(ny) = 0.0
-#       do j=1,ny-1
-#          ! Jacobian term drops out because using zonal means.
-#          ! A term also dropped here
-#          w2(j) = lambdasq*p2/f0 * ( (ds1(j)-ds3(j))/dt + &
-#               2*rgas*heat*(2*j-ny)/(f0*cp*ny) )
-#       end do
-#       vv(0) = 0.0
-#       do j=1,ny-1
-#          vv(j) = vv(j-1) - dy/p2 * w2(j)
-#       end do
-#       vv(ny) = 0.0
-#       do j=0,ny
-#          write(unit=4,fmt="(i3,2e15.7)") j, w2(j), vv(j)
-#       end do
-#    end subroutine diagvv
+        nx = Grid.nx; ny=Grid.ny
+        u = - ( s.l1t[:,1:ny+1] - s.l1t[:,0:ny] ) / self.dy
+        self.ds.variables['u'][self.irec,0] = u[1:].T
+        u = - ( s.l3t[:,1:ny+1] - s.l3t[:,0:ny] ) / self.dy
+        self.ds.variables['u'][self.irec,1] = u[1:].T
+        vtmp = Var()
+        for i in range(1,nx+1):
+            im = i-1
+            if im == 0:
+                im = nx
+            vtmp.l1t[i,:] = ( s.l1t[i,:] - s.l1t[im,:] ) / self.dx
+            vtmp.l3t[i,:] = ( s.l3t[i,:] - s.l3t[im,:] ) / self.dx
+        self.ds.variables['v'][self.irec,0] = vtmp.l1t[1:].T
+        self.ds.variables['v'][self.irec,1] = vtmp.l3t[1:].T
+
+        t2 = self.f0*(s.l1t-s.l3t)/self.rgas
+        self.ds.variables['t500'][self.irec] = t2[1:].T
+
+        ps = 0.01 * (1.5*s.l3t - 0.5*s.l1t)*self.f0
+        self.ds.variables['ps'][self.irec] = ps[1:].T
+
+        self.ds.variables['time'][self.irec] = day
 
     def run(self):
 
-        #  Implementation of Phillips' model.
+        # Implementation of Phillips' model.
         # The time integration is carried forward using the vorticity in a three
-        # time level scheme. At each step the streamfunction must be diagnosed from 
-        #  this. 
+        # time level scheme. At each step the streamfunction must be diagnosed from
+        # this.
 
-        #  The streamfunction is denoted by s and vorticity by v.
-        #  Vector wind components are uc and vc.
-        #  Total fields are denoted with suffix t and zonal means with suffix z
+        # The streamfunction is denoted by s and vorticity by v.
+        # Vector wind components are uc and vc.
+        # Total fields are denoted with suffix t and zonal means with suffix z
 
-	day1=131.0; day2 = 160.0
-	freq = 0.25
-	dt1 = 86400.; dt2 = 3600.
-	imp = True
+        day1=131.0; day2 = 200
+        diag_freq = 3600
+        dt1 = 86400.; dt2 = 3600.
+        imp = True
+        nx = Grid.nx
+        ny = Grid.ny
 
         # All initialised to zero, so model is at rest
         s  = Var() #  ! Streamfunction
@@ -524,11 +549,15 @@ class Model:
         vm = Var() #  ! Vorticity at tau - 1 values
         # Temporaries used in timestepping
         x = Var()
+        stmp = Var() # For random initialisation
+        vtmp = Var() # For random initialisation
 
         seed = 123
+        time = 0
         day = 0.0
         addnoise = False
 
+        self.create_nc_output()
         # Time loop
         while True:
             if day < day1:
@@ -539,34 +568,37 @@ class Model:
                 dt = dt2
                 self.diag_flag = False
                 if not addnoise:
-                    # Noise hasn't been done yet
-                    r = ranlux.ranlux()
-                    r.rluxgo(3,seed,0,0)
-                    rarray = r.ranlux(Grid.nx*(Grid.ny-1))
-                    rand = np.zeros((Grid.nx+1,Grid.ny+1))
-                    kk = 0
-                    for j in range(1,Grid.ny):
-                        for i in range(1,Grid.nx+1):
-                            rand[i,j] = rarray[kk]
-                            kk += 1
-                    # Remove the zonal mean
-                    rand -= rand[1:,:].mean(axis=0)
-                    rand *= 8.5e6
-                    #  Define a random streamfunction anomaly
-                    s.l1t[:] += rand
-                    s.l3t[:] += rand
-                    # Convert this to a vorticity anomaly
-                    self.calcvor(s, v)
-                    addnoise = True
                     # Time step has changed so linearly interpolate the previous time
                     # value to ensure a smooth start
                     vm.l1t[:] = v.l1t - (v.l1t-vm.l1t)*dt2/dt1
                     vm.l3t[:] = v.l3t - (v.l3t-vm.l3t)*dt2/dt1
+
+                    # rng = np.random.default_rng(seed)
+                    # rand = rng.random((Grid.nx,Grid.ny-1))
+                    # # Remove the zonal mean
+                    # rand -= rand[1:,:].mean(axis=0)
+                    rval = 1_111_111_111
+                    for j in range(1,Grid.ny):
+                        for i in range(1,Grid.nx+1):
+                            rval = msq_rand(rval)
+                            stmp.l1t[i,j] = float(rval) / 10**10
+                            stmp.l3t[i,j] = stmp.l1t[i,j]
+                    # Remove the zonal mean and scale
+                    stmp.split()
+                    stmp.l1t[:] = self.noisescale*stmp.l1[:]
+                    stmp.l3t[:] = self.noisescale*stmp.l3[:]
+                    # Convert this to a vorticity anomaly
+                    self.calcvor(stmp, vtmp)
+                    # print("V1TMP", abs(vtmp.l1t).max())
+                    v.l1t[:] += vtmp.l1t
+                    v.l3t[:] += vtmp.l3t
+                    vm.l1t[:] += vtmp.l1t
+                    vm.l3t[:] += vtmp.l3t
+                    addnoise = True
                     self.diag_flag = True
 
-            v.split()     
+            v.split()
             self.calc_zonstream(v, s)
-            # print "VS", abs(v.l1z).max(), abs(s.l1z).max()
 
             #  Use relaxation to solve for the anomaly streamfunction
             if zonal:
@@ -579,18 +611,21 @@ class Model:
             # Should be a function
             for j in range(Grid.ny+1):
                 s.l1t[:,j] = s.l1[:,j] + s.l1z[j]
-                s.l3t[:,j] = s.l1[:,j] + s.l3z[j]
-
-            self.diag(day, zonal, s)
-
-            # call diagvv(s1t, s3t, s1tm, s3tm, dt)
+                s.l3t[:,j] = s.l3[:,j] + s.l3z[j]
+            # print("S3 tot", s.l3t[3,4]*1e-6)
+            if time % diag_freq == 0:
+                if zonal:
+                    self.zonal_diag(day, s)
+                else:
+                    self.diag(day, s)
+                    self.nc_output(day, v, s)
 
             # Time stepping
-            # print "SV", v.l3t[5,4], v.l3t[5,5], v.l3t[5,6], s.l3t[5,4], s.l3t[5,5], s.l3t[5,6]
-            self.xcalc(v, vm, s, sm, dt, x)
+            if zonal:
+                self.xcalc(v, vm, s, sm, dt, x)
+            else:
+                self.xcalc(v, vm, s, sm, dt, x)
             x.split()
-            # print "X", x.l1t[5,5], x.l3t[5,5]
-       # print*, "Xanom", day, maxval(abs(x1))/maxval(abs(x1z))
 
             # Solve for new zonal mean vorticity from x
             if imp:
@@ -603,7 +638,7 @@ class Model:
                 v.l3z[0]    = v.l3z[1]
                 v.l3z[ny]   = v.l3z[ny-1]
 
-            if day == 0.0:
+            if time == 0.0:
                 # Forward step from rest. This simple form for the forward step
                 # assumes that it's starting from rest.
                 v.l1z = 0.5*x.l1z
@@ -625,10 +660,9 @@ class Model:
             for j in range(Grid.ny+1):
                 v.l1t[:,j] = v.l1[:,j] + v.l1z[j]
                 v.l3t[:,j] = v.l3[:,j] + v.l3z[j]
-            # print "V1Z", abs(v.l1z).max()
-#             print "V", abs(v.l1t).max(), abs(v.l3t).max()
 
-            day = day + dt/86400.0
+            time += dt
+            day = time/86400.0
             if day > day2:
                 break
 
