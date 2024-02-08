@@ -1,6 +1,14 @@
 # Phillip's model
 # Direct translation of fortran code, using fortran arrays starting at one.
 
+# The time integration is carried forward using the vorticity in a three
+# time level scheme. At each step the streamfunction must be diagnosed from
+# this.
+
+# The streamfunction is denoted by s and vorticity by v.
+# Vector wind components are uc and vc.
+# Total fields are denoted with suffix t and zonal means with suffix z
+
 import numpy as np
 from numpy import linalg
 import netCDF4
@@ -90,6 +98,12 @@ class Model:
     # For netcdf output
     save_netcdf = True
     irec = -1
+
+    day1 = 131.0  # Zonal spin up length
+    dt1 = 86400.  # Spin up time step
+    day2 = 200    # Total run length
+    dt2 = 3600.   # Time step in regular run
+    diag_freq = 3600
 
     def calcvor(self, s, v):
         # This repeats same code for each level. Should the level be another dimension?
@@ -269,7 +283,7 @@ class Model:
                     # print("ITER2", iter, np.sqrt(change1), np.sqrt(change3))
                     break
 
-    def xcalc(self, v, vm, s, sm, dt, x):
+    def xcalc(self, v, vm, s, dt, x):
 
         nx = Grid.nx
         ny = Grid.ny
@@ -517,104 +531,36 @@ class Model:
 
         self.ds.variables['time'][self.irec] = day
 
-    def run(self):
-
-        # Implementation of Phillips' model.
-        # The time integration is carried forward using the vorticity in a three
-        # time level scheme. At each step the streamfunction must be diagnosed from
-        # this.
-
-        # The streamfunction is denoted by s and vorticity by v.
-        # Vector wind components are uc and vc.
-        # Total fields are denoted with suffix t and zonal means with suffix z
-
-        day1=131.0; day2 = 200
-        diag_freq = 3600
-        dt1 = 86400.; dt2 = 3600.
-        nx = Grid.nx
-        ny = Grid.ny
+    def spinup(self):
 
         # All initialised to zero, so model is at rest
-        s  = Var() #  ! Streamfunction
-        sm = Var() #  ! Streamfunction at tau-1
         v =  Var() #  ! Vorticity
         vm = Var() #  ! Vorticity at tau - 1 values
+        s  = Var() #  ! Streamfunction
         # Temporaries used in timestepping
         x = Var()
-        stmp = Var() # For random initialisation
-        vtmp = Var() # For random initialisation
 
-        seed = 123
         time = 0
         day = 0.0
-        addnoise = False
+        dt = self.dt1
 
-        if self.save_netcdf:
-            self.create_nc_output()
         # Time loop
         while True:
-            if day < day1:
-                zonal = True # 130 day spin up using a one day time step
-                dt = dt1
-            else:
-                zonal = False
-                dt = dt2
-                self.diag_flag = False
-                if not addnoise:
-                    # Time step has changed so linearly interpolate the previous time
-                    # value to ensure a smooth start
-                    vm.l1t[:] = v.l1t - (v.l1t-vm.l1t)*dt2/dt1
-                    vm.l3t[:] = v.l3t - (v.l3t-vm.l3t)*dt2/dt1
-
-                    # rng = np.random.default_rng(seed)
-                    # rand = rng.random((Grid.nx,Grid.ny-1))
-                    # # Remove the zonal mean
-                    # rand -= rand[1:,:].mean(axis=0)
-                    rval = 1_111_111_111
-                    for j in range(1,Grid.ny):
-                        for i in range(1,Grid.nx+1):
-                            rval = msq_rand(rval)
-                            stmp.l1t[i,j] = float(rval) / 10**10
-                            stmp.l3t[i,j] = stmp.l1t[i,j]
-                    # Remove the zonal mean and scale
-                    stmp.split()
-                    stmp.l1t[:] = self.noisescale*stmp.l1[:]
-                    stmp.l3t[:] = self.noisescale*stmp.l3[:]
-                    # Convert this to a vorticity anomaly
-                    self.calcvor(stmp, vtmp)
-                    # print("V1TMP", abs(vtmp.l1t).max())
-                    v.l1t[:] += vtmp.l1t
-                    v.l3t[:] += vtmp.l3t
-                    vm.l1t[:] += vtmp.l1t
-                    vm.l3t[:] += vtmp.l3t
-                    addnoise = True
-                    self.diag_flag = True
-
             v.split()
             self.calc_zonstream(v, s)
 
-            #  Use relaxation to solve for the anomaly streamfunction
-            if zonal:
-                s.l1[:] = 0.0
-                s.l3[:] = 0.0
-            else:
-                self.relax1(v, s)
+            s.l1[:] = 0.0
+            s.l3[:] = 0.0
 
-            sm.settot(s)  # Do a copy
             # Should be a function
             for j in range(Grid.ny+1):
                 s.l1t[:,j] = s.l1[:,j] + s.l1z[j]
                 s.l3t[:,j] = s.l3[:,j] + s.l3z[j]
-            if time % diag_freq == 0:
-                if zonal:
-                    self.zonal_diag(day, s)
-                else:
-                    self.diag(day, s)
-                    if self.save_netcdf:
-                        self.nc_output(day, v, s)
+            if time % self.diag_freq == 0:
+                self.zonal_diag(day, s)
 
             # Time stepping
-            self.xcalc(v, vm, s, sm, dt, x)
+            self.xcalc(v, vm, s, dt, x)
             x.split()
 
             # Solve for new zonal mean vorticity from x
@@ -629,22 +575,107 @@ class Model:
                 # Update previous value of vorticity
                 vm.settot(v)
 
-            if zonal:
-                v.set(0.0)
-            else:
-                # Relaxation solver for non-zonal terms
-                self.relax2(x, dt, v)
+            v.set(0.0)
+            for j in range(Grid.ny+1):
+                v.l1t[:,j] = v.l1z[j]
+                v.l3t[:,j] = v.l3z[j]
 
-            # print*, "Vanom", day, maxval(abs(v1))/maxval(abs(v1z))
+            time += dt
+            day = time/86400.0
+            if day >= self.day1:
+                break
+
+        return vm, v
+
+    def perturb(self, vm, v):
+
+        stmp = Var() # For random initialisation
+        vtmp = Var() # For random initialisation
+
+        # Time step has changed so linearly interpolate the previous time
+        # value to ensure a smooth start
+        vm.l1t[:] = v.l1t - (v.l1t-vm.l1t)*self.dt2/self.dt1
+        vm.l3t[:] = v.l3t - (v.l3t-vm.l3t)*self.dt2/self.dt1
+
+        rval = 1_111_111_111
+        for j in range(1,Grid.ny):
+            for i in range(1,Grid.nx+1):
+                rval = msq_rand(rval)
+                stmp.l1t[i,j] = float(rval) / 10**10
+                stmp.l3t[i,j] = stmp.l1t[i,j]
+        # Remove the zonal mean and scale
+        stmp.split()
+        stmp.l1t[:] = self.noisescale*stmp.l1[:]
+        stmp.l3t[:] = self.noisescale*stmp.l3[:]
+        # Convert this to a vorticity anomaly
+        self.calcvor(stmp, vtmp)
+        v.l1t[:] += vtmp.l1t
+        v.l3t[:] += vtmp.l3t
+        vm.l1t[:] += vtmp.l1t
+        vm.l3t[:] += vtmp.l3t
+
+        return vm, v
+
+    def run(self, vm, v):
+
+        # All initialised to zero, so model is at rest
+        s  = Var() #  ! Streamfunction
+        # Temporaries used in timestepping
+        x = Var()
+
+        day = self.day1
+        time = day * 86400
+        dt = self.dt2
+        # Time loop
+        while True:
+
+            v.split()
+            self.calc_zonstream(v, s)
+
+            #  Use relaxation to solve for the anomaly streamfunction
+            self.relax1(v, s)
+
+            # Should be a function
+            for j in range(Grid.ny+1):
+                s.l1t[:,j] = s.l1[:,j] + s.l1z[j]
+                s.l3t[:,j] = s.l3[:,j] + s.l3z[j]
+            if time % self.diag_freq == 0:
+                self.diag(day, s)
+                if self.save_netcdf:
+                    self.nc_output(day, v, s)
+
+            # Time stepping
+            self.xcalc(v, vm, s, dt, x)
+            x.split()
+
+            # Solve for new zonal mean vorticity from x
+            self.calc_zvor(x,dt,v)
+
+            if time == 0.0:
+                # Forward step from rest. This simple form for the forward step
+                # assumes that it's starting from rest.
+                v.l1z = 0.5*x.l1z
+                v.l3z = 0.5*x.l3z
+            else:
+                # Update previous value of vorticity
+                vm.settot(v)
+
+            # Relaxation solver for non-zonal terms
+            self.relax2(x, dt, v)
+
             for j in range(Grid.ny+1):
                 v.l1t[:,j] = v.l1[:,j] + v.l1z[j]
                 v.l3t[:,j] = v.l3[:,j] + v.l3z[j]
 
             time += dt
             day = time/86400.0
-            if day > day2:
+            if day > self.day2:
                 break
 
 if __name__ == '__main__':
     m = Model()
-    m.run()
+    if m.save_netcdf:
+        m.create_nc_output()
+    vm, v = m.spinup()
+    vm, v = m.perturb(vm, v)
+    m.run(vm, v)
