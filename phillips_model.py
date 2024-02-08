@@ -11,6 +11,8 @@
 
 import numpy as np
 from numpy import linalg
+from scipy.linalg.lapack import dgtsv
+
 import netCDF4
 
 def msq_rand(x):
@@ -320,69 +322,42 @@ class Model:
                 x.l3t[i,j] = x.l3t[i,j] -  self.k*dt*(1.5*vm.l3t[i,j] - v.l1t[i,j] -
                                     4*self.gamma*(s.l1t[i,j]-s.l3t[i,j]) )
 
-    def tridag(self,A,B,C,R,U,N):
-        gam = np.zeros(N+1)
-        if B[1] == 0.:
-            raise Exception("TRIDAG error")
-        bet = B[1]
-        U[1] = R[1]/bet
-        for j in range(2,N+1):
-            gam[j] = C[j-1]/bet
-            bet = B[j] - A[j]*gam[j]
-            if bet == 0.:
-                raise Exception("TRIDAG error")
-            U[j] = (R[j]-A[j]*U[j-1])/bet
-        for j in range(N-1,0,-1):
-            U[j] = U[j]-gam[j+1]*U[j+1]
-
     def calc_zvor(self, x, dt, v):
         # Solve for the zonal mean vorticity
         ny = Grid.ny
         epsq = self.epsq
 
         nz = ny-1
-        amat = np.zeros(nz+1)
-        bmat = np.zeros(nz+1)
-        cmat = np.zeros(nz+1)
-        rmat = np.zeros(nz+1)
-        umat = np.zeros(nz+1)
+        amat = np.zeros(nz-1)
+        bmat = np.zeros(nz)
+        cmat = np.zeros(nz-1)
+        rmat = np.zeros(nz)
 
         alpha = self.a*dt/self.dx**2
         # Level 1
-        amat[1] = 0.0
-        bmat[1] = -alpha*epsq - 1
-        cmat[1] = alpha*epsq
-        amat[2:ny-1] = alpha*epsq
-        bmat[2:ny-1] = -2.0*alpha*epsq - 1
-        cmat[2:ny-1] = alpha*epsq
-        amat[nz] = alpha*epsq
-        bmat[nz] = -alpha*epsq - 1
-        cmat[nz] = 0.0
+        amat[:] = alpha*epsq
+        bmat[0] = bmat[nz-1] = -alpha*epsq - 1
+        bmat[1:nz-1] = -2.0*alpha*epsq - 1
+        cmat[:] = alpha*epsq
+        rmat[:] = -x.l1z[1:nz+1]
 
-        rmat[1:] = -x.l1z[1:nz+1]
-
-        self.tridag(amat,bmat,cmat,rmat,umat,nz)
-
-        v.l1z[1:nz+1] = umat[1:nz+1]
+        result = dgtsv(amat, bmat, cmat, rmat)
+        umat = result[3]
+        v.l1z[1:nz+1] = umat[:]
         v.l1z[0] = v.l1z[1]
         v.l1z[ny] = v.l1z[ny-1]
 
         # Level 3
-        amat[1] = 0.0
-        bmat[1] = -alpha*epsq - 1 - 1.5*self.k*dt
-        cmat[1] = alpha*epsq
-        amat[2:ny-1] = alpha*epsq
-        bmat[2:ny-1] = -2.0*alpha*epsq - 1 - 1.5*self.k*dt
-        cmat[2:ny-1] = alpha*epsq
-        amat[nz] = alpha*epsq
-        bmat[nz] = -alpha*epsq - 1 - 1.5*self.k*dt
-        cmat[nz] = 0.0
+        # amat[:] = alpha*epsq
+        # bmat[0] = bmat[nz-1] = -alpha*epsq - 1 - 1.5*self.k*dt
+        # bmat[1:nz-1] = -2.0*alpha*epsq - 1 - 1.5*self.k*dt
+        # cmat[:] = alpha*epsq
+        bmat -= 1.5*self.k*dt
+        rmat[:] = -x.l3z[1:nz+1]
 
-        rmat[1:] = -x.l3z[1:nz+1]
-
-        self.tridag(amat,bmat,cmat,rmat,umat,nz)
-
-        v.l3z[1:nz+1] = umat[1:nz+1]
+        result = dgtsv(amat, bmat, cmat, rmat)
+        umat = result[3]
+        v.l3z[1:nz+1] = umat[:]
         v.l3z[0] = v.l3z[1]
         v.l3z[ny] = v.l3z[ny-1]
 
