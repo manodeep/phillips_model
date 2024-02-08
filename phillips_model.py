@@ -289,18 +289,18 @@ class Model:
                                              self.epsq * ( v.l3[i,jp] + v.l3[i,jm] ) ) +
                                      x.l3[i,j]  ) /    \
                                      ( 2*alpha*(1.0 + self.epsq)  + 1.0 +1.5*self.k*dt )
-                change1 = np.sum ( ( v.l1[1:,1:] - temp.l1[1:,1:] ) **2 )
-                v.l1[:,1:ny] = temp.l1[:,1:ny]
-                # Boundary condition A17
-                v.l1[:,0] = v.l1[:,1].mean()
-                v.l1[:,ny] = v.l1[:,ny-1].mean()
-                change3 = np.sum ( ( v.l3[1:,1:] - temp.l3[1:,1:] ) **2 )
-                v.l3[:,1:ny] = temp.l3[:,1:ny]
-                v.l3[:,0] = v.l3[:,1].mean()
-                v.l3[:,ny] = v.l3[:,ny-1].mean()
-                if max(change1, change3) < 1.0:
-                    # print("ITER2", iter, np.sqrt(change1), np.sqrt(change3))
-                    break
+            change1 = np.sum ( ( v.l1[1:,1:] - temp.l1[1:,1:] ) **2 )
+            v.l1[:,1:ny] = temp.l1[:,1:ny]
+            # Boundary condition A17
+            v.l1[:,0] = v.l1[:,1].mean()
+            v.l1[:,ny] = v.l1[:,ny-1].mean()
+            change3 = np.sum ( ( v.l3[1:,1:] - temp.l3[1:,1:] ) **2 )
+            v.l3[:,1:ny] = temp.l3[:,1:ny]
+            v.l3[:,0] = v.l3[:,1].mean()
+            v.l3[:,ny] = v.l3[:,ny-1].mean()
+            if max(change1, change3) < 1.0:
+                # print("ITER2", iter, np.sqrt(change1), np.sqrt(change3))
+                break
 
     def xcalc(self, v, vm, s, dt, x):
 
