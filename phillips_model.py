@@ -82,13 +82,13 @@ class Model:
 
     # Control variables
     a = 1.0e5               # m^2/s   Horizonal diffusion
-    imp = True
     diag_flag = False
     accel = 1.0
 
     noisescale = 1.237e7
 
     # For netcdf output
+    save_netcdf = True
     irec = -1
 
     def calcvor(self, s, v):
@@ -274,9 +274,6 @@ class Model:
         nx = Grid.nx
         ny = Grid.ny
         alpha = self.a*dt/self.dx**2
-        if not self.imp:
-            alpha = 2.0 * alpha
-
         b = self.beta*self.dx**2*self.dy
         c = dt/(2.0*self.dx*self.dy)
         h = 4*self.rgas*self.heat*self.gamma*dt/(self.f0*self.cp)
@@ -306,12 +303,8 @@ class Model:
                            alpha * ( vm.l3t[ip,j]+vm.l3t[im,j]-2*vm.l3t[i,j] +            \
                                     self.epsq*(vm.l3t[i,jp]+vm.l3t[i,jm]-2*vm.l3t[i,j]) ) -  \
                         h*(2*j-ny)/ny
-                if self.imp:
-                    x.l3t[i,j] = x.l3t[i,j] -  self.k*dt*(1.5*vm.l3t[i,j] - v.l1t[i,j] -
-                                               4*self.gamma*(s.l1t[i,j]-s.l3t[i,j]) )
-                else:
-                    x.l3t[i,j] = x.l3t[i,j] -  self.k*dt*(3.0*vm.l3t[i,j] - vm.l1t[i,j] -
-                                               4*self.gamma*(sm.l1t[i,j]-sm.l3t[i,j]) )
+                x.l3t[i,j] = x.l3t[i,j] -  self.k*dt*(1.5*vm.l3t[i,j] - v.l1t[i,j] -
+                                    4*self.gamma*(s.l1t[i,j]-s.l3t[i,j]) )
 
     def tridag(self,A,B,C,R,U,N):
         gam = np.zeros(N+1)
@@ -538,7 +531,6 @@ class Model:
         day1=131.0; day2 = 200
         diag_freq = 3600
         dt1 = 86400.; dt2 = 3600.
-        imp = True
         nx = Grid.nx
         ny = Grid.ny
 
@@ -557,7 +549,8 @@ class Model:
         day = 0.0
         addnoise = False
 
-        self.create_nc_output()
+        if self.save_netcdf:
+            self.create_nc_output()
         # Time loop
         while True:
             if day < day1:
@@ -612,31 +605,20 @@ class Model:
             for j in range(Grid.ny+1):
                 s.l1t[:,j] = s.l1[:,j] + s.l1z[j]
                 s.l3t[:,j] = s.l3[:,j] + s.l3z[j]
-            # print("S3 tot", s.l3t[3,4]*1e-6)
             if time % diag_freq == 0:
                 if zonal:
                     self.zonal_diag(day, s)
                 else:
                     self.diag(day, s)
-                    self.nc_output(day, v, s)
+                    if self.save_netcdf:
+                        self.nc_output(day, v, s)
 
             # Time stepping
-            if zonal:
-                self.xcalc(v, vm, s, sm, dt, x)
-            else:
-                self.xcalc(v, vm, s, sm, dt, x)
+            self.xcalc(v, vm, s, sm, dt, x)
             x.split()
 
             # Solve for new zonal mean vorticity from x
-            if imp:
-                self.calc_zvor(x,dt,v)
-            else:
-                v.l1z[1:ny] = x.l1z[1:ny]
-                v.l1z[0]    = v.l1z[1]
-                v.l1z[ny]   = v.l1z[ny-1]
-                v.l3z[1:ny] = x.l3z[1:ny]
-                v.l3z[0]    = v.l3z[1]
-                v.l3z[ny]   = v.l3z[ny-1]
+            self.calc_zvor(x,dt,v)
 
             if time == 0.0:
                 # Forward step from rest. This simple form for the forward step
@@ -650,11 +632,8 @@ class Model:
             if zonal:
                 v.set(0.0)
             else:
-                if imp:
-                    # Relaxation solver for non-zonal terms
-                    self.relax2(x, dt, v)
-                else:
-                    v.set(x)
+                # Relaxation solver for non-zonal terms
+                self.relax2(x, dt, v)
 
             # print*, "Vanom", day, maxval(abs(v1))/maxval(abs(v1z))
             for j in range(Grid.ny+1):
