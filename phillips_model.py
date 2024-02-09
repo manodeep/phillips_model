@@ -11,6 +11,8 @@
 
 import numpy as np
 from scipy.linalg.lapack import dgtsv, dgetrf, dgetrs
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 
 import netCDF4
 
@@ -397,6 +399,12 @@ class Model:
 
         print("TZ %5.1f %15.7f %15.7f %15.7f %15.7f %15.7f" % ( day, t2z.max(), u.l1z.max(), u.l3z.max(), zke, zpe))
 
+    def calc_T(self):
+        return self.f0*(self.s.l1t-self.s.l3t)/self.rgas
+
+    def calc_ps(self):
+        return 0.01 * (1.5*self.s.l3t - 0.5*self.s.l1t)*self.f0
+
     def diag(self, day, s):
 
         u = Var()
@@ -653,11 +661,31 @@ class Model:
         self.time += dt
         self.day = self.time/86400.0
 
-if __name__ == '__main__':
+def main():
     m = Model()
     if m.save_netcdf:
         m.create_nc_output()
     m.spinup()
     m.perturb()
-    while m.day < m.day2:
-        m.step()
+    animate = True
+    if animate:
+        fig, axes = plt.subplots()
+        # p = plt.pcolormesh(m.s.l1t.T)
+        p = plt.pcolormesh(m.calc_T().T[::-1], vmin=-30, vmax=30, cmap='coolwarm')
+        def animate(i):
+            m.step()
+            # p.set_array(m.s.l1t.T.flatten())
+            p.set_array(m.calc_T().T[::-1].flatten())
+            axes.set_title(f"Day {m.day:.2f}")
+        ani = animation.FuncAnimation(fig, animate, frames=1000,
+                                interval=0)
+
+        plt.show()
+    else:
+        while m.day < m.day2:
+            m.step()
+
+# import cProfile
+# from pstats import SortKey
+# cProfile.run('main()', sort=SortKey.CUMULATIVE)
+main()
