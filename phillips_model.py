@@ -21,8 +21,12 @@ def msq_rand(x):
     return ((x*x) // 10**5) % 10**10
 
 class Grid:
+    L = 6.0e6
+    W = 5.0e6  # y coord goes from -W to W (Phillips notation])
     nx = 16
     ny = 16
+    dx = L / nx   # 3.75e5
+    dy = 2*W / ny # 6.25e5    # Gridsize
 
 class Var():
 
@@ -78,8 +82,9 @@ class Var():
 
 
 class Model:
-    dx=3.75e5; dy=6.25e5    # Gridsize
-    eps=dx/dy; epsq = eps*eps
+
+    eps = Grid.dx/Grid.dy
+    epsq = eps*eps
     heat = 2.0e-3           #  Heating W/kg
     lambdasq = 1.5e-12      # Stability parameter, m^-2
     rgas = 287.0
@@ -88,7 +93,7 @@ class Model:
     beta = 1.6e-11          # s^{-1} m^{-1}
     p4 = 1.0e5              # Surface pressure, Pa
     p2 = 0.5*p4
-    gamma = lambdasq*dx*dx  # 0.21
+    gamma = lambdasq*Grid.dx**2  # 0.21
     k = 4.0e-6              # s^{-1}  Surface drag
 
     # Control variables
@@ -96,17 +101,19 @@ class Model:
     diag_flag = False
     accel = 1.0
 
-    noisescale = 1.237e7
+    noisescale = 7.509e6
 
     # For netcdf output
-    save_netcdf = True
+    save_netcdf = False
     irec = -1
 
     day1 = 131.0  # Zonal spin up length
     dt1 = 86400.  # Spin up time step
-    day2 = 200    # Total run length
-    dt2 = 3600.   # Time step in regular run
-    diag_freq = 3600
+    day2 = 162.   # Total run length
+    dt2 = 7200.   # Time step in regular run
+    dt = dt1
+    variable_step = True
+    diag_freq = 86400
 
     first_step = True # For solver initialisation
 
@@ -119,6 +126,7 @@ class Model:
 
     time = 0
     day = 0
+    np.seterr(over='raise', invalid='raise', divide='raise')
 
     def calcvor(self, s, v):
         # This repeats same code for each level. Should the level be another dimension?
@@ -256,7 +264,7 @@ class Model:
             # maxdiff is now only on a single level so halve the convergence
             # criterion
             if maxdiff < 0.5*3.75e4:
-                # print "ITER1 done", iter, np.sqrt(change), maxdiff
+                # print("ITER1 done", iter, np.sqrt(change), maxdiff)
                 break
         if iter >= 100:
             raise Exception(f"RELAX1 failed {iter} {np.sqrt(change)} {maxdiff}")
@@ -270,7 +278,7 @@ class Model:
 
         v.l1[:] = 0.0
         v.l3[:] = 0.0
-        alpha = self.a*dt/self.dx**2
+        alpha = self.a*dt/Grid.dx**2
         for iter in range(100):
             # Jacobi iteration
             for j in range(1,ny):
@@ -308,9 +316,9 @@ class Model:
 
         nx = Grid.nx
         ny = Grid.ny
-        alpha = self.a*dt/self.dx**2
-        b = self.beta*self.dx**2*self.dy
-        c = dt/(2.0*self.dx*self.dy)
+        alpha = self.a*dt/Grid.dx**2
+        b = self.beta*Grid.dx**2*Grid.dy
+        c = dt/(2.0*Grid.dx*Grid.dy)
         h = 4*self.rgas*self.heat*self.gamma*dt/(self.f0*self.cp)
         x.l1t[:] = 0.0
         x.l3t[:] = 0.0
@@ -352,7 +360,7 @@ class Model:
         cmat = np.zeros(nz-1)
         rmat = np.zeros(nz)
 
-        alpha = self.a*dt/self.dx**2
+        alpha = self.a*dt/Grid.dx**2
         # Level 1
         amat[:] = alpha*epsq
         bmat[0] = bmat[nz-1] = -alpha*epsq - 1
@@ -383,7 +391,7 @@ class Model:
     def zonal_diag(self, day, s):
         u = Var()
         ny = Grid.ny
-        dy = self.dy
+        dy = Grid.dy
 
         t2z = self.f0*(s.l1z[:]-s.l3z[:])/self.rgas
         #  Zonal wind, u = -pd{psi}{y}
@@ -411,7 +419,7 @@ class Model:
         v = Var()
         vshift = Var()
         nx = Grid.nx; ny = Grid.ny
-        dx = self.dx; dy = self.dy
+        dx = Grid.dx; dy = Grid.dy
 
         u.l1t[:,1:] = - ( s.l1t[:,1:ny+1] - s.l1t[:,0:ny] ) / dy
         u.l3t[:,1:] = - ( s.l3t[:,1:ny+1] - s.l3t[:,0:ny] ) / dy
@@ -424,29 +432,50 @@ class Model:
         #  Average v to get it on the same grid points as u
         for i in range(1,nx+1):
             ip = i+1
-            if ip > Grid.nx:
+            if ip > nx:
                 ip = 1
             for j in range(1,ny+1):
                 vshift.l1t[i][j] = 0.25*(v.l1t[i][j] + v.l1t[ip][j] +
                                     v.l1t[i][j-1] + v.l1t[ip][j-1])
                 vshift.l3t[i][j] = 0.25*(v.l3t[i][j] + v.l3t[ip][j] +
                                     v.l3t[i][j-1] + v.l3t[ip][j-1])
-
+        # print("MAX V", v.l1t.max(), vshift.l1t.max())
         # Calculate zonal mean and eddy winds
         u.split()
         vshift.split()
+        v.split()
 
+        # Note factor of 10 here.
         tke = 10.0*np.sum(u.l1t[1:,1:]*u.l1t[1:,1:] + u.l3t[1:,1:]*u.l3t[1:,1:] +
                             vshift.l1t[1:,1:]*vshift.l1t[1:,1:] + vshift.l3t[1:,1:]*vshift.l3t[1:,1:])/(2*ny*nx)
 
         zke = 10.0*np.sum(u.l1z*u.l1z + u.l3z*u.l3z)/(2*ny)
-        eke = 10.0*np.sum(u.l1*u.l1 + u.l3*u.l3 + vshift.l1*vshift.l1 + vshift.l3*vshift.l3)/(2*ny*nx)
+        # eke = 10.0*np.sum(u.l1*u.l1 + u.l3*u.l3 + vshift.l1*vshift.l1 + vshift.l3*vshift.l3)/(2*ny*nx)
+        eke = 10.0*np.sum(u.l1**2 + u.l3**2 + v.l1**2 + v.l3**2)/(2*ny*nx)
 
-        t2 = self.f0*(s.l1t-s.l3t)/self.rgas
+        zpe = 5*self.lambdasq*np.sum((s.l1z[1:ny] - s.l3z[1:ny])**2) / ny
+        epe = 5*self.lambdasq*np.sum((s.l1[:,1:ny] - s.l3[:,1:ny])**2) / (nx*ny)
 
-        print("KE %6.2f %14.7f %14.7f %14.7f %14.7f %14.7f %14.7f" %( day, t2.max(), u.l1t.max(), u.l3t.max(), zke, eke, tke))
+        print("KE %6.2f %9.2f %9.2f %9.2f %9.2f" %( day, zke, eke, epe, zpe))
         if eke > 1e5:
             raise Exception("EKE too large")
+
+    def stability_criterion(self, dt, s):
+        # Stability criterion (A13)
+        smax = 0.
+        for i in range(1,Grid.nx+1):
+            im = i-1
+            if im == 0:
+                im = Grid.nx
+            ip = i+1
+            if ip > Grid.nx:
+                ip = 1
+            for j in range(1,Grid.ny):
+                jm = j-1
+                jp = j+1
+                smax = max(smax, abs(s.l1t[ip,j]-s.l1t[im,j]) + abs(s.l1t[i,jp]-s.l1t[i,jm]))
+                smax = max(smax, abs(s.l3t[ip,j]-s.l3t[im,j]) + abs(s.l3t[i,jp]-s.l3t[i,jm]))
+        return 0.5*dt*smax / (Grid.dx*Grid.dy)
 
     def create_nc_output(self):
 
@@ -492,11 +521,23 @@ class Model:
         v = ds.createVariable('v', np.float32, ('time', 'lev', 'lat', 'vlon'))
         v.long_name = 'meridional wind'
         v.units = 'm s-1'
+        v = ds.createVariable('eke', np.float32, ('time',))
+        v.long_name = "Eddy kinetic energy (*10)"
+        v = ds.createVariable('zke', np.float32, ('time',))
+        v.long_name = "Zonal kinetic energy (*10)"
+        v = ds.createVariable('epe', np.float32, ('time',))
+        v.long_name = "Eddy potential energy (*10)"
+        v = ds.createVariable('zpe', np.float32, ('time',))
+        v.long_name = "Zonal potential energy (*10)"
 
-        ds.variables['lon'][:] = 1 + np.arange(Grid.nx)
-        ds.variables['lat'][:] = np.arange(Grid.ny+1)
-        ds.variables['vlon'][:] = 0.5 + np.arange(Grid.nx)
-        ds.variables['ulat'][:] = 0.5 + np.arange(Grid.ny)
+        # At latitude 45
+        dlon = 360 * Grid.dx / (6.371e6*2*np.pi*np.cos(np.pi/4))
+        ds.variables['lon'][:] = np.arange(Grid.nx) * dlon
+        lat0 = 45.
+        dlat = 360 * Grid.dy / (6.371e6*2*np.pi)
+        ds.variables['lat'][:] = 45 + dlat*np.arange(-Grid.ny//2, Grid.ny//2+1)
+        ds.variables['vlon'][:] = ds.variables['lon'][:] - 0.5*dlon
+        ds.variables['ulat'][:] = ds.variables['lat'][:-1] + 0.5*dlat
         ds.variables['lev'][:] = [1., 3.]
 
     def nc_output(self, day, v, s):
@@ -509,19 +550,31 @@ class Model:
         self.ds.variables['strm'][self.irec,1] = s.l3t[1:].T
 
         nx = Grid.nx; ny=Grid.ny
-        u = - ( s.l1t[:,1:ny+1] - s.l1t[:,0:ny] ) / self.dy
-        self.ds.variables['u'][self.irec,0] = u[1:].T
-        u = - ( s.l3t[:,1:ny+1] - s.l3t[:,0:ny] ) / self.dy
-        self.ds.variables['u'][self.irec,1] = u[1:].T
+        u = Var()
         vtmp = Var()
+        u.l1t[:,1:] = - ( s.l1t[:,1:ny+1] - s.l1t[:,0:ny] ) / Grid.dy
+        u.l3t[:,1:] = - ( s.l3t[:,1:ny+1] - s.l3t[:,0:ny] ) / Grid.dy
+        self.ds.variables['u'][self.irec,0] = u.l1t[1:,1:].T
+        self.ds.variables['u'][self.irec,1] = u.l3t[1:,1:].T
         for i in range(1,nx+1):
             im = i-1
             if im == 0:
                 im = nx
-            vtmp.l1t[i,:] = ( s.l1t[i,:] - s.l1t[im,:] ) / self.dx
-            vtmp.l3t[i,:] = ( s.l3t[i,:] - s.l3t[im,:] ) / self.dx
+            vtmp.l1t[i,:] = ( s.l1t[i,:] - s.l1t[im,:] ) / Grid.dx
+            vtmp.l3t[i,:] = ( s.l3t[i,:] - s.l3t[im,:] ) / Grid.dx
         self.ds.variables['v'][self.irec,0] = vtmp.l1t[1:].T
         self.ds.variables['v'][self.irec,1] = vtmp.l3t[1:].T
+
+        u.split()
+        vtmp.split()
+        zke = 10.0*np.sum(u.l1z**2 + u.l3z**2)/(2*ny)
+        eke = 10.0*np.sum(u.l1**2 + u.l3**2 + vtmp.l1**2 + vtmp.l3**2)/(2*ny*nx)
+        zpe = 5*self.lambdasq*np.sum((s.l1z[1:ny] - s.l3z[1:ny])**2) / ny
+        epe = 5*self.lambdasq*np.sum((s.l1[:,1:ny] - s.l3[:,1:ny])**2) / (nx*ny)
+        self.ds.variables['zke'][self.irec] = zke
+        self.ds.variables['eke'][self.irec] = eke
+        self.ds.variables['zpe'][self.irec] = zpe
+        self.ds.variables['epe'][self.irec] = epe
 
         t2 = self.f0*(s.l1t-s.l3t)/self.rgas
         self.ds.variables['t500'][self.irec] = t2[1:].T
@@ -529,7 +582,8 @@ class Model:
         ps = 0.01 * (1.5*s.l3t - 0.5*s.l1t)*self.f0
         self.ds.variables['ps'][self.irec] = ps[1:].T
 
-        self.ds.variables['time'][self.irec] = day
+        # Use time since perturbation
+        self.ds.variables['time'][self.irec] = day - self.day1
 
     def spinup(self):
 
@@ -537,8 +591,6 @@ class Model:
         vm = self.vm
         s = self.s
         x = self.x
-
-        dt = self.dt1
 
         # Time loop
         while True:
@@ -556,11 +608,11 @@ class Model:
                 self.zonal_diag(self.day, s)
 
             # Time stepping
-            self.xcalc(v, vm, s, dt, x)
+            self.xcalc(v, vm, s, self.dt, x)
             x.split()
 
             # Solve for new zonal mean vorticity from x
-            self.calc_zvor(x,dt,v)
+            self.calc_zvor(x, self.dt, v)
 
             if self.time == 0.0:
                 # Forward step from rest. This simple form for the forward step
@@ -576,7 +628,7 @@ class Model:
                 v.l1t[:,j] = v.l1z[j]
                 v.l3t[:,j] = v.l3z[j]
 
-            self.time += dt
+            self.time += self.dt
             self.day = self.time/86400.0
             if self.day >= self.day1:
                 break
@@ -596,8 +648,8 @@ class Model:
         vm.l3t[:] = v.l3t - (v.l3t-vm.l3t)*self.dt2/self.dt1
 
         rval = 1_111_111_111
-        for j in range(1,Grid.ny):
-            for i in range(1,Grid.nx+1):
+        for i in range(1,Grid.nx+1):
+            for j in range(1,Grid.ny):
                 rval = msq_rand(rval)
                 stmp.l1t[i,j] = float(rval) / 10**10
                 stmp.l3t[i,j] = stmp.l1t[i,j]
@@ -618,7 +670,6 @@ class Model:
         vm = self.vm
         s = self.s
         x = self.x
-        dt = self.dt2
 
         v.split()
         self.calc_zonstream(v, s)
@@ -636,11 +687,11 @@ class Model:
                 self.nc_output(self.day, v, s)
 
         # Time stepping
-        self.xcalc(v, vm, s, dt, x)
+        self.xcalc(v, vm, s, self.dt, x)
         x.split()
 
         # Solve for new zonal mean vorticity from x
-        self.calc_zvor(x,dt,v)
+        self.calc_zvor(x,self.dt,v)
 
         if self.time == 0.0:
             # Forward step from rest. This simple form for the forward step
@@ -652,22 +703,32 @@ class Model:
             vm.settot(v)
 
         # Relaxation solver for non-zonal terms
-        self.relax2(x, dt, v)
+        self.relax2(x, self.dt, v)
 
         for j in range(Grid.ny+1):
             v.l1t[:,j] = v.l1[:,j] + v.l1z[j]
             v.l3t[:,j] = v.l3[:,j] + v.l3z[j]
 
-        self.time += dt
+        self.time += self.dt
         self.day = self.time/86400.0
 
+        if self.variable_step and self.time % 86400 == 0 and self.dt > 1800:
+            stab_crit = self.stability_criterion(self.dt, s)
+            # print(f"Stability  {self.day:.2f} {stab_crit:.3f}")
+            if stab_crit > 0.9:
+                print(f"At {self.day:.2f} {stab_crit:.3f} Adjusting time step to {self.dt-1800}")
+                vm.l1t[:] = v.l1t - (v.l1t-vm.l1t)*(self.dt-1800)/self.dt
+                vm.l3t[:] = v.l3t - (v.l3t-vm.l3t)*(self.dt-1800)/self.dt
+                self.dt -= 1800
+
 def main():
+    import time
     m = Model()
     if m.save_netcdf:
         m.create_nc_output()
     m.spinup()
     m.perturb()
-    animate = True
+    animate = False
     if animate:
         fig, axes = plt.subplots()
         # p = plt.pcolormesh(m.s.l1t.T)
@@ -682,8 +743,12 @@ def main():
 
         plt.show()
     else:
+        m.dt = m.dt2
+        t1 = time.perf_counter()
         while m.day < m.day2:
             m.step()
+        t2 = time.perf_counter()
+        print("Elapsed time", t2-t1)
 
 # import cProfile
 # from pstats import SortKey
