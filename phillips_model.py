@@ -13,6 +13,7 @@ import numpy as np
 from scipy.linalg.lapack import dgtsv, dgetrf, dgetrs
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+import numba as nb
 
 import netCDF4
 
@@ -104,16 +105,16 @@ class Model:
     noisescale = 7.509e6
 
     # For netcdf output
-    save_netcdf = False
+    save_netcdf = True
     irec = -1
 
     day1 = 131.0  # Zonal spin up length
     dt1 = 86400.  # Spin up time step
-    day2 = 162.   # Total run length
+    day2 = 172.   # Total run length
     dt2 = 7200.   # Time step in regular run
     dt = dt1
     variable_step = True
-    diag_freq = 86400
+    diag_freq = 3600
 
     first_step = True # For solver initialisation
 
@@ -127,6 +128,9 @@ class Model:
     time = 0
     day = 0
     np.seterr(over='raise', invalid='raise', divide='raise')
+
+    ps_levels = np.arange(-79,-8,7)
+    ps_cmap = 'jet'
 
     def calcvor(self, s, v):
         # This repeats same code for each level. Should the level be another dimension?
@@ -608,7 +612,14 @@ class Model:
                 self.zonal_diag(self.day, s)
 
             # Time stepping
-            self.xcalc(v, vm, s, self.dt, x)
+            # self.xcalc(v, vm, s, self.dt, x)
+            alpha = self.a*self.dt/Grid.dx**2
+            b = self.beta*Grid.dx**2*Grid.dy
+            c = self.dt/(2.0*Grid.dx*Grid.dy)
+            h = 4*self.rgas*self.heat*self.gamma*self.dt/(self.f0*self.cp)
+            xcalc_nb(v.l1t, v.l3t, vm.l1t, vm.l3t, s.l1t, s.l3t, x.l1t, x.l3t,
+                     self.dt, Grid.nx, Grid.ny, self.epsq, alpha, b, c, h, self.k, self.gamma)
+
             x.split()
 
             # Solve for new zonal mean vorticity from x
@@ -675,7 +686,8 @@ class Model:
         self.calc_zonstream(v, s)
 
         #  Use relaxation to solve for the anomaly streamfunction
-        self.relax1(v, s)
+        relax1_nb(v.l1, v.l3, s.l1, s.l3, Grid.nx, Grid.ny, self.epsq, self.gamma)
+
 
         # Should be a function
         for j in range(Grid.ny+1):
@@ -687,7 +699,14 @@ class Model:
                 self.nc_output(self.day, v, s)
 
         # Time stepping
-        self.xcalc(v, vm, s, self.dt, x)
+        # self.xcalc(v, vm, s, self.dt, x)
+        alpha = self.a*self.dt/Grid.dx**2
+        b = self.beta*Grid.dx**2*Grid.dy
+        c = self.dt/(2.0*Grid.dx*Grid.dy)
+        h = 4*self.rgas*self.heat*self.gamma*self.dt/(self.f0*self.cp)
+        xcalc_nb(v.l1t, v.l3t, vm.l1t, vm.l3t, s.l1t, s.l3t, x.l1t, x.l3t,
+                    self.dt, Grid.nx, Grid.ny, self.epsq, alpha, b, c, h, self.k, self.gamma)
+
         x.split()
 
         # Solve for new zonal mean vorticity from x
@@ -703,7 +722,9 @@ class Model:
             vm.settot(v)
 
         # Relaxation solver for non-zonal terms
-        self.relax2(x, self.dt, v)
+        # self.relax2(x, self.dt, v)
+        alpha = self.a*self.dt/Grid.dx**2
+        relax2_nb(v.l1, v.l3, x.l1, x.l3, self.dt, Grid.nx, Grid.ny, alpha, self.epsq, self.k)
 
         for j in range(Grid.ny+1):
             v.l1t[:,j] = v.l1[:,j] + v.l1z[j]
@@ -721,6 +742,169 @@ class Model:
                 vm.l3t[:] = v.l3t - (v.l3t-vm.l3t)*(self.dt-1800)/self.dt
                 self.dt -= 1800
 
+@nb.jit(cache=True)
+def relax1_nb(v1, v3, s1, s3, nx, ny, epsq, gamma):
+    # Solve for anomaly streamfunction
+
+    # Start from the current value of the anomaly streamfunction
+    for iter in range(100):
+        # Jacobi iteration
+        maxdiff = 0.0
+        change = 0.0
+        # for irb in range(2):
+        for j in range(1,ny):
+            jm = j-1
+            jp = j+1
+            for i in range(1,nx+1):
+                im = i-1
+                if im == 0:
+                    im = nx
+                ip = i+1
+                if ip == nx+1:
+                    ip = 1
+
+                resid = ( s1[ip,j] + s1[im,j] +
+                            epsq*( s1[i,jp] + s1[i,jm] ) -
+                            v1[i,j] + gamma*s3[i,j] ) -  \
+                            ( 2.0 + 2.0*epsq + gamma )*s1[i,j]
+                resid = resid / ( 2.0 + 2.0*epsq + gamma )
+                change = change + resid**2
+                maxdiff = max ( maxdiff, abs(resid) )
+                s1[i,j] = s1[i,j] + resid
+
+                resid = ( s3[ip,j] + s3[im,j] +
+                            epsq*( s3[i,jp] + s3[i,jm] ) -
+                            v3[i,j] + gamma*s1[i,j] ) -  \
+                            ( 2.0 + 2.0*epsq + gamma )*s3[i,j]
+
+                resid = resid / ( 2.0 + 2.0*epsq + gamma )
+                change = change + resid**2
+                maxdiff = max ( maxdiff, abs(resid) )
+                s3[i,j] = s3[i,j] + resid
+        # print("ITER1", iter, np.sqrt(change), maxdiff)
+        # maxdiff is now only on a single level so halve the convergence
+        # criterion
+        if maxdiff < 0.5*3.75e4:
+            # print("ITER1 done", iter, np.sqrt(change), maxdiff)
+            break
+    if iter >= 100:
+        raise Exception(f"RELAX1 failed {iter} {np.sqrt(change)} {maxdiff}")
+
+@nb.jit(cache=True)
+def relax2_nb(v1, v3, x1, x3, dt, nx, ny, alpha, epsq, k):
+    # Solve for anomaly vorticity
+
+    temp1 = np.zeros( (nx+1,ny+1) )
+    temp3 = np.zeros( (nx+1,ny+1) )
+
+    v1[:] = 0.0
+    v3[:] = 0.0
+    for iter in range(100):
+        # Jacobi iteration
+        for j in range(1,ny):
+            jm = j-1
+            jp = j+1
+            for i in range(1,nx+1):
+                im = i-1
+                if im == 0:
+                    im = nx
+                ip = i+1
+                if ip == nx+1:
+                    ip = 1
+                temp1[i,j] = ( alpha*( v1[ip,j] + v1[im,j] +
+                                            epsq * ( v1[i,jp] + v1[i,jm] ) ) +
+                                    x1[i,j]  ) /    \
+                                    ( 2*alpha*(1.0 + epsq)  + 1.0 )
+                temp3[i,j] = ( alpha*( v3[ip,j] + v3[im,j] +
+                                            epsq * ( v3[i,jp] + v3[i,jm] ) ) +
+                                    x3[i,j]  ) /    \
+                                    ( 2*alpha*(1.0 + epsq)  + 1.0 +1.5*k*dt )
+        change1 = np.sum ( ( v1[1:,1:] - temp1[1:,1:] ) **2 )
+        v1[:,1:ny] = temp1[:,1:ny]
+        # Boundary condition A17
+        v1[:,0] = v1[:,1].mean()
+        v1[:,ny] = v1[:,ny-1].mean()
+        change3 = np.sum ( ( v3[1:,1:] - temp3[1:,1:] ) **2 )
+        v3[:,1:ny] = temp3[:,1:ny]
+        v3[:,0] = v3[:,1].mean()
+        v3[:,ny] = v3[:,ny-1].mean()
+        if max(change1, change3) < 1.0:
+            # print("ITER2", iter, np.sqrt(change1), np.sqrt(change3))
+            break
+
+@nb.jit(cache=True)
+def xcalc_nb(v1t, v3t, vm1t, vm3t, s1t, s3t, x1t, x3t, dt, nx, ny, epsq, alpha, b, c, h, k, gamma):
+
+    x1t[:] = 0.0
+    x3t[:] = 0.0
+    for j in range(1,ny):
+        jm = j-1
+        jp = j+1
+        for i in range(1,nx+1):
+            im = i-1
+            if im == 0:
+                im = nx
+            ip = i+1
+            if ip == nx+1:
+                ip = 1
+
+            x1t[i,j] = vm1t[i,j] +                                           \
+                c * ( (v1t[ip,j]-v1t[im,j])*(s1t[i,jp]-s1t[i,jm]) -             \
+                        (2*b+v1t[i,jp]-v1t[i,jm])*(s1t[ip,j]-s1t[im,j]) ) +      \
+                        alpha * ( vm1t[ip,j]+vm1t[im,j]-2*vm1t[i,j] +           \
+                                epsq*(vm1t[i,jp]+vm1t[i,jm]-2*vm1t[i,j]) ) +        \
+                    h*(2*j-ny)/ny
+
+            x3t[i,j] = vm3t[i,j] +                                             \
+                c * ( (v3t[ip,j]-v3t[im,j])*(s3t[i,jp]-s3t[i,jm]) -              \
+                        (2*b+v3t[i,jp]-v3t[i,jm])*(s3t[ip,j]-s3t[im,j]) ) +       \
+                        alpha * ( vm3t[ip,j]+vm3t[im,j]-2*vm3t[i,j] +            \
+                                epsq*(vm3t[i,jp]+vm3t[i,jm]-2*vm3t[i,j]) ) -  \
+                    h*(2*j-ny)/ny
+            x3t[i,j] = x3t[i,j] -  k*dt*(1.5*vm3t[i,j] - v1t[i,j] -
+                                4*gamma*(s1t[i,j]-s3t[i,j]) )
+
+class Animation():
+    def __init__(self, m):
+        self.m = m
+        fig, self.axes = plt.subplots()
+        # self.pT = plt.pcolormesh(self.m.calc_T().T[::-1,1:], vmin=-30, vmax=30, cmap='coolwarm')
+        # self.p = plt.pcolormesh(self.m.calc_ps().T[::-1,1:], vmin=-65, vmax=-25)
+        # self.p = plt.contourf(self.m.calc_ps().T[::-1,1:], levels=np.arange(-65,-25,7))
+        self.p = plt.contourf(self.m.calc_ps().T[::-1,1:], levels=self.m.ps_levels, cmap=self.m.ps_cmap, extend='both')
+        # self.colorbar = plt.colorbar(self.p)
+        self.animation = animation.FuncAnimation(fig, self.update, frames=10000,
+                                interval=0, repeat=False)
+        self.paused = False
+
+        fig.canvas.mpl_connect('button_press_event', self.toggle_pause)
+
+    def toggle_pause(self, event):
+        # If paused, use right button to single step
+        if event.button == 1:
+            if self.paused:
+                self.animation.resume()
+            else:
+                self.animation.pause()
+            self.paused = not self.paused
+        if self.paused and event.button==3:
+            self.animation._step()
+
+    def update(self,i):
+        if self.m.day > self.m.day2:
+            self.animation.event_source.stop()
+        self.m.step()
+        # self.pT.set_array(self.m.calc_T().T[::-1,1:].flatten())
+        tmp = self.m.calc_ps().T[::-1,1:]
+        print(tmp.max(), tmp.min())
+        # For animating a contour plot
+        # https://scipython.com/blog/animated-contour-plots-with-matplotlib/
+        for coll in self.p.collections:
+            coll.remove()
+        self.p = plt.contourf(self.m.calc_ps().T[::-1,1:], levels=self.m.ps_levels, cmap=self.m.ps_cmap, extend='both')
+        self.axes.set_title(f"Day {self.m.day:.2f}")
+        return self.p
+
 def main():
     import time
     m = Model()
@@ -728,27 +912,21 @@ def main():
         m.create_nc_output()
     m.spinup()
     m.perturb()
-    animate = False
+    m.dt = m.dt2
+    animate = True
     if animate:
-        fig, axes = plt.subplots()
-        # p = plt.pcolormesh(m.s.l1t.T)
-        p = plt.pcolormesh(m.calc_T().T[::-1], vmin=-30, vmax=30, cmap='coolwarm')
-        def animate(i):
-            m.step()
-            # p.set_array(m.s.l1t.T.flatten())
-            p.set_array(m.calc_T().T[::-1].flatten())
-            axes.set_title(f"Day {m.day:.2f}")
-        ani = animation.FuncAnimation(fig, animate, frames=1000,
-                                interval=0)
-
+        anim = Animation(m)
         plt.show()
     else:
-        m.dt = m.dt2
         t1 = time.perf_counter()
+        t1x = 0
         while m.day < m.day2:
             m.step()
+            if not t1x:
+                t1x = time.perf_counter()
         t2 = time.perf_counter()
         print("Elapsed time", t2-t1)
+        print("Elapsed time excluding compilation", t2-t1x)
 
 # import cProfile
 # from pstats import SortKey
