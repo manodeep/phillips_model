@@ -14,6 +14,7 @@ from scipy.linalg.lapack import dgtsv, dgetrf, dgetrs
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import numba as nb
+import time
 
 import netCDF4
 
@@ -106,11 +107,10 @@ class Model:
 
     # For netcdf output
     save_netcdf = True
-    irec = -1
 
     day1 = 131.0  # Zonal spin up length
     dt1 = 86400.  # Spin up time step
-    day2 = 172.   # Total run length
+    day2 = 165.   # Total run length
     dt2 = 7200.   # Time step in regular run
     dt = dt1
     variable_step = True
@@ -417,48 +417,63 @@ class Model:
     def calc_ps(self):
         return 0.01 * (1.5*self.s.l3t - 0.5*self.s.l1t)*self.f0
 
-    def diag(self, day, s):
-
+    def calc_u(self, s):
         u = Var()
-        v = Var()
-        vshift = Var()
-        nx = Grid.nx; ny = Grid.ny
-        dx = Grid.dx; dy = Grid.dy
+        u.l1t[:,1:] = - ( s.l1t[:,1:Grid.ny+1] - s.l1t[:,0:Grid.ny] ) / Grid.dy
+        u.l3t[:,1:] = - ( s.l3t[:,1:Grid.ny+1] - s.l3t[:,0:Grid.ny] ) / Grid.dy
+        return u
 
-        u.l1t[:,1:] = - ( s.l1t[:,1:ny+1] - s.l1t[:,0:ny] ) / dy
-        u.l3t[:,1:] = - ( s.l3t[:,1:ny+1] - s.l3t[:,0:ny] ) / dy
-        for i in range(1,nx+1):
+    def calc_v(self, s):
+        v = Var()
+        for i in range(1,Grid.nx+1):
             im = i-1
             if im == 0:
-                im = nx
-            v.l1t[i,:] = ( s.l1t[i,:] - s.l1t[im,:] ) / dx
-            v.l3t[i,:] = ( s.l3t[i,:] - s.l3t[im,:] ) / dx
-        #  Average v to get it on the same grid points as u
-        for i in range(1,nx+1):
-            ip = i+1
-            if ip > nx:
-                ip = 1
-            for j in range(1,ny+1):
-                vshift.l1t[i][j] = 0.25*(v.l1t[i][j] + v.l1t[ip][j] +
-                                    v.l1t[i][j-1] + v.l1t[ip][j-1])
-                vshift.l3t[i][j] = 0.25*(v.l3t[i][j] + v.l3t[ip][j] +
-                                    v.l3t[i][j-1] + v.l3t[ip][j-1])
-        # print("MAX V", v.l1t.max(), vshift.l1t.max())
+                im = Grid.nx
+            v.l1t[i,:] = ( s.l1t[i,:] - s.l1t[im,:] ) / Grid.dx
+            v.l3t[i,:] = ( s.l3t[i,:] - s.l3t[im,:] ) / Grid.dx
+        return v
+
+    def calc_energy(self, s, u, v):
         # Calculate zonal mean and eddy winds
         u.split()
-        vshift.split()
         v.split()
-
-        # Note factor of 10 here.
-        tke = 10.0*np.sum(u.l1t[1:,1:]*u.l1t[1:,1:] + u.l3t[1:,1:]*u.l3t[1:,1:] +
-                            vshift.l1t[1:,1:]*vshift.l1t[1:,1:] + vshift.l3t[1:,1:]*vshift.l3t[1:,1:])/(2*ny*nx)
+        nx = Grid.nx; ny = Grid.ny
 
         zke = 10.0*np.sum(u.l1z*u.l1z + u.l3z*u.l3z)/(2*ny)
-        # eke = 10.0*np.sum(u.l1*u.l1 + u.l3*u.l3 + vshift.l1*vshift.l1 + vshift.l3*vshift.l3)/(2*ny*nx)
         eke = 10.0*np.sum(u.l1**2 + u.l3**2 + v.l1**2 + v.l3**2)/(2*ny*nx)
 
         zpe = 5*self.lambdasq*np.sum((s.l1z[1:ny] - s.l3z[1:ny])**2) / ny
         epe = 5*self.lambdasq*np.sum((s.l1[:,1:ny] - s.l3[:,1:ny])**2) / (nx*ny)
+
+        return zke, eke, zpe, epe
+
+    def diag(self, day, s):
+
+        nx = Grid.nx; ny = Grid.ny
+        dx = Grid.dx; dy = Grid.dy
+
+        u = self.calc_u(s)
+        v = self.calc_v(s)
+        zke, eke, zpe, epe = self.calc_energy(s, u, v)
+
+        # Is this KE with the shifted winds useful?
+        # Which is best in the energy conversions?
+        # vshift = Var()
+        # #  Average v to get it on the same grid points as u
+        # for i in range(1,nx+1):
+        #     ip = i+1
+        #     if ip > nx:
+        #         ip = 1
+        #     for j in range(1,ny+1):
+        #         vshift.l1t[i][j] = 0.25*(v.l1t[i][j] + v.l1t[ip][j] +
+        #                             v.l1t[i][j-1] + v.l1t[ip][j-1])
+        #         vshift.l3t[i][j] = 0.25*(v.l3t[i][j] + v.l3t[ip][j] +
+        #                             v.l3t[i][j-1] + v.l3t[ip][j-1])
+        # # print("MAX V", v.l1t.max(), vshift.l1t.max())
+        # vshift.split()
+        # # Note factor of 10 here.
+        # tke = 10.0*np.sum(u.l1t[1:,1:]*u.l1t[1:,1:] + u.l3t[1:,1:]*u.l3t[1:,1:] +
+        #                     vshift.l1t[1:,1:]*vshift.l1t[1:,1:] + vshift.l3t[1:,1:]*vshift.l3t[1:,1:])/(2*ny*nx)
 
         print("KE %6.2f %9.2f %9.2f %9.2f %9.2f" %( day, zke, eke, epe, zpe))
         if eke > 1e5:
@@ -483,7 +498,7 @@ class Model:
 
     def create_nc_output(self):
 
-        self.ds = netCDF4.Dataset('phillips_model.nc', 'w')
+        self.ds = netCDF4.Dataset('c:/Users/dix043/temp/phillips_model.nc', 'w')
         ds = self.ds
         ds.createDimension('lon', Grid.nx)
         ds.createDimension('lat', 1+Grid.ny)
@@ -544,6 +559,8 @@ class Model:
         ds.variables['ulat'][:] = ds.variables['lat'][:-1] + 0.5*dlat
         ds.variables['lev'][:] = [1., 3.]
 
+        self.irec = -1
+
     def nc_output(self, day, v, s):
         # Python variables are (nx, ny) so need to transpose when writing
         # to match netCDF dimensions
@@ -553,38 +570,21 @@ class Model:
         self.ds.variables['strm'][self.irec,0] = s.l1t[1:].T
         self.ds.variables['strm'][self.irec,1] = s.l3t[1:].T
 
-        nx = Grid.nx; ny=Grid.ny
-        u = Var()
-        vtmp = Var()
-        u.l1t[:,1:] = - ( s.l1t[:,1:ny+1] - s.l1t[:,0:ny] ) / Grid.dy
-        u.l3t[:,1:] = - ( s.l3t[:,1:ny+1] - s.l3t[:,0:ny] ) / Grid.dy
+        u = self.calc_u(s)
         self.ds.variables['u'][self.irec,0] = u.l1t[1:,1:].T
         self.ds.variables['u'][self.irec,1] = u.l3t[1:,1:].T
-        for i in range(1,nx+1):
-            im = i-1
-            if im == 0:
-                im = nx
-            vtmp.l1t[i,:] = ( s.l1t[i,:] - s.l1t[im,:] ) / Grid.dx
-            vtmp.l3t[i,:] = ( s.l3t[i,:] - s.l3t[im,:] ) / Grid.dx
+        vtmp = self.calc_v(s)
         self.ds.variables['v'][self.irec,0] = vtmp.l1t[1:].T
         self.ds.variables['v'][self.irec,1] = vtmp.l3t[1:].T
 
-        u.split()
-        vtmp.split()
-        zke = 10.0*np.sum(u.l1z**2 + u.l3z**2)/(2*ny)
-        eke = 10.0*np.sum(u.l1**2 + u.l3**2 + vtmp.l1**2 + vtmp.l3**2)/(2*ny*nx)
-        zpe = 5*self.lambdasq*np.sum((s.l1z[1:ny] - s.l3z[1:ny])**2) / ny
-        epe = 5*self.lambdasq*np.sum((s.l1[:,1:ny] - s.l3[:,1:ny])**2) / (nx*ny)
+        zke, eke, zpe, epe = self.calc_energy(s, u, vtmp)
         self.ds.variables['zke'][self.irec] = zke
         self.ds.variables['eke'][self.irec] = eke
         self.ds.variables['zpe'][self.irec] = zpe
         self.ds.variables['epe'][self.irec] = epe
 
-        t2 = self.f0*(s.l1t-s.l3t)/self.rgas
-        self.ds.variables['t500'][self.irec] = t2[1:].T
-
-        ps = 0.01 * (1.5*s.l3t - 0.5*s.l1t)*self.f0
-        self.ds.variables['ps'][self.irec] = ps[1:].T
+        self.ds.variables['t500'][self.irec] = self.calc_T()[1:].T
+        self.ds.variables['ps'][self.irec] = self.calc_ps()[1:].T
 
         # Use time since perturbation
         self.ds.variables['time'][self.irec] = day - self.day1
@@ -865,13 +865,18 @@ def xcalc_nb(v1t, v3t, vm1t, vm3t, s1t, s3t, x1t, x3t, dt, nx, ny, epsq, alpha, 
                                 4*gamma*(s1t[i,j]-s3t[i,j]) )
 
 class Animation():
-    def __init__(self, m):
+    def __init__(self, m, t1):
         self.m = m
-        fig, self.axes = plt.subplots()
+        self.t1 = t1
+        fig = plt.figure()
+        self.axes1 = fig.add_subplot(1,2,1)
         # self.pT = plt.pcolormesh(self.m.calc_T().T[::-1,1:], vmin=-30, vmax=30, cmap='coolwarm')
+        self.pT = plt.contourf(self.m.calc_T().T[::-1,1:], vmin=-30, vmax=30, cmap='coolwarm')
         # self.p = plt.pcolormesh(self.m.calc_ps().T[::-1,1:], vmin=-65, vmax=-25)
         # self.p = plt.contourf(self.m.calc_ps().T[::-1,1:], levels=np.arange(-65,-25,7))
+        self.axes2 = fig.add_subplot(1,2,2)
         self.p = plt.contourf(self.m.calc_ps().T[::-1,1:], levels=self.m.ps_levels, cmap=self.m.ps_cmap, extend='both')
+        self.pc = plt.contour(self.m.calc_ps().T[::-1,1:], levels=self.m.ps_levels, colors='black', negative_linestyles='solid')
         # self.colorbar = plt.colorbar(self.p)
         self.animation = animation.FuncAnimation(fig, self.update, frames=10000,
                                 interval=0, repeat=False)
@@ -893,20 +898,25 @@ class Animation():
     def update(self,i):
         if self.m.day > self.m.day2:
             self.animation.event_source.stop()
+            t2 = time.perf_counter()
+            print("Elapsed time", t2-self.t1)
         self.m.step()
+        # For a pcolormesh simply reset the data
         # self.pT.set_array(self.m.calc_T().T[::-1,1:].flatten())
-        tmp = self.m.calc_ps().T[::-1,1:]
-        print(tmp.max(), tmp.min())
+        self.pT.remove()
+        self.pT = self.axes1.contourf(self.m.calc_T().T[::-1,1:], vmin=-30, vmax=30, cmap='coolwarm')
+        # tmp = self.m.calc_ps().T[::-1,1:]
+        # print(tmp.max(), tmp.min())
         # For animating a contour plot
         # https://scipython.com/blog/animated-contour-plots-with-matplotlib/
-        for coll in self.p.collections:
-            coll.remove()
-        self.p = plt.contourf(self.m.calc_ps().T[::-1,1:], levels=self.m.ps_levels, cmap=self.m.ps_cmap, extend='both')
-        self.axes.set_title(f"Day {self.m.day:.2f}")
-        return self.p
+        self.p.remove()
+        self.p = self.axes2.contourf(self.m.calc_ps().T[::-1,1:], levels=self.m.ps_levels, cmap=self.m.ps_cmap, extend='both')
+        self.pc.remove()
+        self.pc = self.axes2.contour(self.m.calc_ps().T[::-1,1:], levels=self.m.ps_levels, colors='black', negative_linestyles='solid')
+        self.axes1.set_title(f"Day {self.m.day:.2f}")
+
 
 def main():
-    import time
     m = Model()
     if m.save_netcdf:
         m.create_nc_output()
@@ -914,11 +924,11 @@ def main():
     m.perturb()
     m.dt = m.dt2
     animate = True
+    t1 = time.perf_counter()
     if animate:
-        anim = Animation(m)
+        anim = Animation(m, t1)
         plt.show()
     else:
-        t1 = time.perf_counter()
         t1x = 0
         while m.day < m.day2:
             m.step()
