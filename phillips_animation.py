@@ -26,8 +26,7 @@ def animate(i):
     global p_ps
     p_T.set_array(t500[i][::-1].values.flatten())
     # https://scipython.com/blog/animated-contour-plots-with-matplotlib/
-    for coll in p_ps.collections:
-        coll.remove()
+    p_ps.remove()
     p_ps = ps[i][::-1].plot.contour(add_colorbar=False,levels=np.arange(-65,-25,7))
     axes.set_title(f"Day {131+i/24:.2f}")
     axes.invert_yaxis()
