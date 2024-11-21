@@ -15,7 +15,6 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import numba as nb
 import time
-
 import netCDF4
 
 def msq_rand(x):
@@ -106,13 +105,14 @@ class Model:
     noisescale = 7.509e6
 
     # For netcdf output
-    save_netcdf = True
+    save_netcdf = False
 
     day1 = 131.0  # Zonal spin up length
     dt1 = 86400.  # Spin up time step
-    day2 = 165.   # Total run length
-    dt2 = 7200.   # Time step in regular run
+    day2 = 165.5    # Total run length
+    dt2 = 7200.   # Initial time step in regular run
     dt = dt1
+    min_dt = 1800.
     variable_step = True
     diag_freq = 3600
 
@@ -129,8 +129,16 @@ class Model:
     day = 0
     np.seterr(over='raise', invalid='raise', divide='raise')
 
-    ps_levels = np.arange(-79,-8,7)
+    ps_offset = 1040
+    ps_levels = np.arange(-75,-6,5) + ps_offset
     ps_cmap = 'jet'
+    T_levels = np.linspace(-30,30,16)
+    T_cmap = 'RdBu_r'
+    # u_levels = np.linspace(-70,70,15)   # 250 hPa
+    u_levels = np.linspace(-15,15,11)   # 1000 hPa
+    # u_levels = np.linspace(-25,25,11)   # 750 hPa
+    u_cmap = 'RdBu_r'
+
 
     def calcvor(self, s, v):
         # This repeats same code for each level. Should the level be another dimension?
@@ -733,14 +741,14 @@ class Model:
         self.time += self.dt
         self.day = self.time/86400.0
 
-        if self.variable_step and self.time % 86400 == 0 and self.dt > 1800:
+        if self.variable_step and self.time % 86400 == 0 and self.dt > self.min_dt:
             stab_crit = self.stability_criterion(self.dt, s)
             # print(f"Stability  {self.day:.2f} {stab_crit:.3f}")
             if stab_crit > 0.9:
-                print(f"At {self.day:.2f} {stab_crit:.3f} Adjusting time step to {self.dt-1800}")
-                vm.l1t[:] = v.l1t - (v.l1t-vm.l1t)*(self.dt-1800)/self.dt
-                vm.l3t[:] = v.l3t - (v.l3t-vm.l3t)*(self.dt-1800)/self.dt
-                self.dt -= 1800
+                print(f"At {self.day:.2f} {stab_crit:.3f} Adjusting time step to {self.dt-self.min_dt}")
+                vm.l1t[:] = v.l1t - (v.l1t-vm.l1t)*(self.dt-self.min_dt)/self.dt
+                vm.l3t[:] = v.l3t - (v.l3t-vm.l3t)*(self.dt-self.min_dt)/self.dt
+                self.dt -= self.min_dt
 
 @nb.jit(cache=True)
 def relax1_nb(v1, v3, s1, s3, nx, ny, epsq, gamma):
@@ -868,21 +876,31 @@ class Animation():
     def __init__(self, m, t1):
         self.m = m
         self.t1 = t1
-        fig = plt.figure()
-        self.axes1 = fig.add_subplot(1,2,1)
-        # self.pT = plt.pcolormesh(self.m.calc_T().T[::-1,1:], vmin=-30, vmax=30, cmap='coolwarm')
-        self.pT = plt.contourf(self.m.calc_T().T[::-1,1:], vmin=-30, vmax=30, cmap='coolwarm')
-        # self.p = plt.pcolormesh(self.m.calc_ps().T[::-1,1:], vmin=-65, vmax=-25)
-        # self.p = plt.contourf(self.m.calc_ps().T[::-1,1:], levels=np.arange(-65,-25,7))
-        self.axes2 = fig.add_subplot(1,2,2)
-        self.p = plt.contourf(self.m.calc_ps().T[::-1,1:], levels=self.m.ps_levels, cmap=self.m.ps_cmap, extend='both')
-        self.pc = plt.contour(self.m.calc_ps().T[::-1,1:], levels=self.m.ps_levels, colors='black', negative_linestyles='solid')
-        # self.colorbar = plt.colorbar(self.p)
+        fig = plt.figure(figsize=(12,8))
+        self.axes1 = fig.add_subplot(1,3,1)
+        self.p = plt.contourf(self.m.calc_ps().T[::-1,1:]+self.m.ps_offset, levels=self.m.ps_levels, cmap=self.m.ps_cmap, extend='both')
+        self.pc = plt.contour(self.m.calc_ps().T[::-1,1:]+self.m.ps_offset, levels=self.m.ps_levels, colors='black', negative_linestyles='solid')
+        plt.colorbar(self.p, orientation='horizontal', label='Sea level pressure (hPa)')
+        self.axes2 = fig.add_subplot(1,3,2)
+        self.pT = plt.contourf(self.m.calc_T().T[::-1,1:], levels=self.m.T_levels, cmap=self.m.T_cmap, extend='both')
+        plt.colorbar(self.pT, orientation='horizontal', label='Temperature at 500 hPa ($\degree$C)')
+        self.axes3 = fig.add_subplot(1,3,3)
+        u = self.m.calc_u(self.m.s)
+        usurf = 1.5*u.l3t - 0.5*u.l1t
+        self.pU = plt.contourf(usurf.T[::-1,1:], levels=self.m.u_levels, cmap=self.m.u_cmap, extend='both')
+        # self.pU = plt.contourf(self.m.calc_u(self.m.s).l1t.T[::-1,1:], levels=self.m.u_levels, cmap=self.m.u_cmap, extend='both')
+        plt.colorbar(self.pU, orientation='horizontal', label='Zonal wind at 1000 hPa (m/s)')
         self.animation = animation.FuncAnimation(fig, self.update, frames=10000,
                                 interval=0, repeat=False)
-        self.paused = False
+        self.axes2.set_title(f"Day {self.m.day-self.m.day1:.2f}\n", fontsize=20)
+        plt.tight_layout()
+
 
         fig.canvas.mpl_connect('button_press_event', self.toggle_pause)
+        self.paused = False
+        self.dosleep = False
+        # self.paused=True
+        # self.animation.pause()
 
     def toggle_pause(self, event):
         # If paused, use right button to single step
@@ -896,31 +914,43 @@ class Animation():
             self.animation._step()
 
     def update(self,i):
+
         if self.m.day > self.m.day2:
             self.animation.event_source.stop()
             t2 = time.perf_counter()
             print("Elapsed time", t2-self.t1)
-        self.m.step()
-        # For a pcolormesh simply reset the data
-        # self.pT.set_array(self.m.calc_T().T[::-1,1:].flatten())
-        self.pT.remove()
-        self.pT = self.axes1.contourf(self.m.calc_T().T[::-1,1:], vmin=-30, vmax=30, cmap='coolwarm')
+
+        # This gives a chance to pause on the first frame
+        if i > 3:
+            self.m.step()
+
         # tmp = self.m.calc_ps().T[::-1,1:]
         # print(tmp.max(), tmp.min())
         # For animating a contour plot
         # https://scipython.com/blog/animated-contour-plots-with-matplotlib/
         self.p.remove()
-        self.p = self.axes2.contourf(self.m.calc_ps().T[::-1,1:], levels=self.m.ps_levels, cmap=self.m.ps_cmap, extend='both')
+        self.p = self.axes1.contourf(self.m.calc_ps().T[::-1,1:]+self.m.ps_offset, levels=self.m.ps_levels, cmap=self.m.ps_cmap, extend='both')
         self.pc.remove()
-        self.pc = self.axes2.contour(self.m.calc_ps().T[::-1,1:], levels=self.m.ps_levels, colors='black', negative_linestyles='solid')
-        self.axes1.set_title(f"Day {self.m.day:.2f}")
-
+        self.pc = self.axes1.contour(self.m.calc_ps().T[::-1,1:]+self.m.ps_offset, levels=self.m.ps_levels, colors='black', negative_linestyles='solid')
+        self.axes2.set_title(f"Day {self.m.day-self.m.day1:.2f}\n", fontsize=20)
+        # For a pcolormesh simply reset the data
+        # self.pT.set_array(self.m.calc_T().T[::-1,1:].flatten())
+        self.pT.remove()
+        self.pT = self.axes2.contourf(self.m.calc_T().T[::-1,1:], levels=self.m.T_levels, cmap=self.m.T_cmap, extend='both')
+        self.pU.remove()
+        u = self.m.calc_u(self.m.s)
+        usurf = 1.5*u.l3t - 0.5*u.l1t
+        self.pU = self.axes3.contourf(usurf.T[::-1,1:], levels=self.m.u_levels, cmap=self.m.u_cmap, extend='both')
+        # self.pU = self.axes3.contourf(self.m.calc_u(self.m.s).l1t.T[::-1,1:], levels=self.m.u_levels, cmap=self.m.u_cmap, extend='both')
+        plt.tight_layout()
 
 def main():
     m = Model()
+    m.spinup()
     if m.save_netcdf:
         m.create_nc_output()
-    m.spinup()
+        # Save unperturbed as a prior time
+        m.nc_output(m.day1-m.dt2, m.v, m.s)
     m.perturb()
     m.dt = m.dt2
     animate = True
